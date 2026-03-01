@@ -1,0 +1,113 @@
+{
+  "project_name": "todo_app",
+  "description": "A simple todo app where users can add, complete, and delete tasks",
+  "stack": {
+    "frontend": "React",
+    "backend": "Flask",
+    "database": "PostgreSQL"
+  },
+  "files": [
+    {
+      "path": "backend/config.py",
+      "description": "Flask config with DATABASE_URL from environment variables",
+      "depends_on": []
+    },
+    {
+      "path": "backend/models.py",
+      "description": "SQLAlchemy models for tasks",
+      "depends_on": [
+        "backend/config.py"
+      ]
+    },
+    {
+      "path": "backend/routes.py",
+      "description": "API endpoints for tasks, all datetime fields must use .isoformat() for JSON serialization",
+      "depends_on": [
+        "backend/models.py"
+      ]
+    },
+    {
+      "path": "backend/app.py",
+      "description": "Main Flask app entry point",
+      "depends_on": [
+        "backend/config.py",
+        "backend/models.py",
+        "backend/routes.py"
+      ]
+    },
+    {
+      "path": "frontend/package.json",
+      "description": "React app dependencies including axios and react-scripts",
+      "depends_on": []
+    },
+    {
+      "path": "frontend/src/index.css",
+      "description": "Basic global styles",
+      "depends_on": []
+    },
+    {
+      "path": "frontend/src/api.js",
+      "description": "Axios API client matching all backend endpoints",
+      "depends_on": []
+    },
+    {
+      "path": "frontend/src/index.js",
+      "description": "React entry point",
+      "depends_on": [
+        "frontend/src/api.js"
+      ]
+    },
+    {
+      "path": ".env.example",
+      "description": "Example environment variables",
+      "depends_on": []
+    }
+  ],
+  "database_schema": {
+    "tables": [
+      {
+        "name": "tasks",
+        "columns": [
+          {
+            "name": "id",
+            "type": "integer",
+            "primary_key": true
+          },
+          {
+            "name": "title",
+            "type": "string"
+          },
+          {
+            "name": "description",
+            "type": "string"
+          },
+          {
+            "name": "completed",
+            "type": "boolean"
+          },
+          {
+            "name": "created_at",
+            "type": "timestamp"
+          },
+          {
+            "name": "updated_at",
+            "type": "timestamp"
+          }
+        ]
+      }
+    ]
+  },
+  "api_endpoints": [
+    "GET /api/tasks",
+    "POST /api/tasks",
+    "GET /api/tasks/:id",
+    "PUT /api/tasks/:id",
+    "DELETE /api/tasks/:id"
+  ],
+  "setup_instructions": [
+    "Copy .env.example to .env and fill in your values",
+    "pip install -r requirements.txt",
+    "python backend/app.py",
+    "cd frontend && npm install && npm start"
+  ]
+}

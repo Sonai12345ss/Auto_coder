@@ -1,0 +1,9 @@
+agent_env/
+__pycache__/
+*.pyc
+.env
+chroma_db/
+sandbox/projects/
+sandbox/temp_script.py
+results_log.json
+*.zip

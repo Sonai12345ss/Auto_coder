@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AutoCoder — Build Full Stack Apps with AI</title>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #080a0f;
+      --surface: #0e1117;
+      --surface2: #151922;
+      --border: #1e2530;
+      --accent: #00e5ff;
+      --accent2: #7b61ff;
+      --text: #e8edf5;
+      --muted: #4a5568;
+      --success: #00e676;
+      --error: #ff5252;
+      --font-display: 'Syne', sans-serif;
+      --font-mono: 'DM Mono', monospace;
+    }
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-display);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(0,229,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,229,255,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+    }
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 48px;
+      background: rgba(8,10,15,0.8);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+    }
+    .logo { font-size: 18px; font-weight: 800; letter-spacing: -0.5px; color: var(--text); }
+    .logo span { color: var(--accent); }
+    .nav-badge {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--accent);
+      background: rgba(0,229,255,0.08);
+      border: 1px solid rgba(0,229,255,0.2);
+      padding: 4px 10px;
+      border-radius: 20px;
+      letter-spacing: 1px;
+    }
+    .hero {
+      position: relative;
+      z-index: 1;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 120px 24px 80px;
+      text-align: center;
+    }
+    .glow-orb {
+      position: absolute;
+      width: 600px; height: 600px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(0,229,255,0.06) 0%, transparent 70%);
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      animation: pulse 4s ease-in-out infinite;
+    }
+    .glow-orb2 {
+      position: absolute;
+      width: 400px; height: 400px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(123,97,255,0.05) 0%, transparent 70%);
+      top: 30%; left: 20%;
+      pointer-events: none;
+      animation: pulse 6s ease-in-out infinite reverse;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.5; transform: translate(-50%, -50%) scale(1); }
+      50% { opacity: 1; transform: translate(-50%, -50%) scale(1.1); }
+    }
+    .hero-tag {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 3px;
+      color: var(--accent);
+      text-transform: uppercase;
+      margin-bottom: 24px;
+      opacity: 0;
+      animation: fadeUp 0.6s ease forwards 0.2s;
+    }
+    .hero-title {
+      font-size: clamp(42px, 7vw, 88px);
+      font-weight: 800;
+      line-height: 1.0;
+      letter-spacing: -3px;
+      margin-bottom: 24px;
+      opacity: 0;
+      animation: fadeUp 0.6s ease forwards 0.4s;
+    }
+    .hero-title .line2 { color: transparent; -webkit-text-stroke: 1px rgba(232,237,245,0.3); }
+    .hero-title .accent-word { color: var(--accent); -webkit-text-stroke: 0; }
+    .hero-subtitle {
+      font-family: var(--font-mono);
+      font-size: 15px;
+      color: var(--muted);
+      max-width: 480px;
+      line-height: 1.7;
+      margin-bottom: 60px;
+      opacity: 0;
+      animation: fadeUp 0.6s ease forwards 0.6s;
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .build-card {
+      width: 100%;
+      max-width: 760px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      overflow: hidden;
+      opacity: 0;
+      animation: fadeUp 0.6s ease forwards 0.8s;
+      box-shadow: 0 0 80px rgba(0,229,255,0.04), 0 40px 80px rgba(0,0,0,0.4);
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface2);
+    }
+    .dot { width: 10px; height: 10px; border-radius: 50%; }
+    .dot-r { background: #ff5f57; }
+    .dot-y { background: #febc2e; }
+    .dot-g { background: #28c840; }
+    .card-title { font-family: var(--font-mono); font-size: 12px; color: var(--muted); margin-left: 8px; letter-spacing: 1px; }
+    .card-body { padding: 32px; }
+    .input-label { font-family: var(--font-mono); font-size: 11px; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 12px; display: block; }
+    .prompt-input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 14px;
+      line-height: 1.7;
+      resize: none;
+      min-height: 120px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      outline: none;
+    }
+    .prompt-input::placeholder { color: var(--muted); }
+    .prompt-input:focus { border-color: rgba(0,229,255,0.4); box-shadow: 0 0 0 3px rgba(0,229,255,0.06); }
+    .input-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; }
+    .input-hint { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+    .build-btn {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--accent);
+      color: var(--bg);
+      border: none;
+      padding: 14px 32px;
+      border-radius: 10px;
+      font-family: var(--font-display);
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      letter-spacing: 0.5px;
+    }
+    .build-btn:hover { background: #33eaff; transform: translateY(-1px); box-shadow: 0 8px 24px rgba(0,229,255,0.25); }
+    .build-btn:active { transform: translateY(0); }
+    .build-btn:disabled { background: var(--muted); cursor: not-allowed; transform: none; box-shadow: none; }
+    .examples { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .example-chip {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--muted);
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .example-chip:hover { color: var(--accent); border-color: rgba(0,229,255,0.3); background: rgba(0,229,255,0.05); }
+    .progress-section { display: none; border-top: 1px solid var(--border); padding: 24px 32px; }
+    .progress-section.visible { display: block; }
+    .progress-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+    .progress-label { font-family: var(--font-mono); font-size: 12px; color: var(--muted); letter-spacing: 1px; }
+    .progress-status { font-family: var(--font-mono); font-size: 11px; color: var(--accent); }
+    .progress-bar-bg { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 24px; }
+    .progress-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); border-radius: 2px; width: 0%; transition: width 0.4s ease; }
+    .log-terminal {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      min-height: 140px;
+      max-height: 220px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.8;
+    }
+    .log-line { display: flex; gap: 10px; opacity: 0; animation: logIn 0.3s ease forwards; }
+    @keyframes logIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: translateX(0); } }
+    .log-prefix { color: var(--accent2); user-select: none; }
+    .log-text { color: var(--text); }
+    .log-text.success { color: var(--success); }
+    .log-text.muted { color: var(--muted); }
+    .log-text.error { color: var(--error); }
+    .download-section { display: none; border-top: 1px solid var(--border); padding: 24px 32px; }
+    .download-section.visible { display: block; }
+    .download-box {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(0,230,118,0.05);
+      border: 1px solid rgba(0,230,118,0.2);
+      border-radius: 12px;
+      padding: 20px 24px;
+    }
+    .download-info { display: flex; flex-direction: column; gap: 4px; }
+    .download-title { font-size: 15px; font-weight: 700; color: var(--success); }
+    .download-meta { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+    .download-btn {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--success);
+      color: var(--bg);
+      border: none;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-family: var(--font-display);
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.2s;
+    }
+    .download-btn:hover { background: #33eb8a; transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0,230,118,0.25); }
+    .stats {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      justify-content: center;
+      gap: 60px;
+      padding: 60px 24px;
+      border-top: 1px solid var(--border);
+    }
+    .stat { text-align: center; }
+    .stat-number { font-size: 36px; font-weight: 800; color: var(--accent); letter-spacing: -2px; display: block; }
+    .stat-label { font-family: var(--font-mono); font-size: 11px; color: var(--muted); letter-spacing: 2px; text-transform: uppercase; margin-top: 4px; }
+    .features {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 0 24px 80px;
+    }
+    .feature-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+      transition: border-color 0.2s, transform 0.2s;
+    }
+    .feature-card:hover { border-color: rgba(0,229,255,0.2); transform: translateY(-2px); }
+    .feature-icon { font-size: 24px; margin-bottom: 16px; display: block; }
+    .feature-title { font-size: 15px; font-weight: 700; margin-bottom: 8px; color: var(--text); }
+    .feature-desc { font-family: var(--font-mono); font-size: 12px; color: var(--muted); line-height: 1.7; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    @media (max-width: 640px) {
+      nav { padding: 16px 24px; }
+      .features { grid-template-columns: 1fr; }
+      .stats { gap: 32px; flex-wrap: wrap; }
+      .input-footer { flex-direction: column; gap: 12px; align-items: stretch; }
+      .download-box { flex-direction: column; gap: 16px; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="logo">Auto<span>Coder</span></div>
+    <div class="nav-badge">BETA · FREE</div>
+  </nav>
+
+  <section class="hero">
+    <div class="glow-orb"></div>
+    <div class="glow-orb2"></div>
+    <p class="hero-tag">↯ Powered by AI · React + Flask + PostgreSQL</p>
+    <h1 class="hero-title">
+      Describe your app.<br/>
+      <span class="line2">We <span class="accent-word">build</span> it.</span>
+    </h1>
+    <p class="hero-subtitle">
+      Type what you want to build in plain English.<br/>
+      Get a complete, production-ready full stack project in minutes.
+    </p>
+
+    <div class="build-card">
+      <div class="card-header">
+        <div class="dot dot-r"></div>
+        <div class="dot dot-y"></div>
+        <div class="dot dot-g"></div>
+        <span class="card-title">autocoder.terminal</span>
+      </div>
+      <div class="card-body">
+        <label class="input-label" for="prompt">// describe your project</label>
+        <textarea id="prompt" class="prompt-input"
+          placeholder="e.g. A todo app where users can add tasks, mark them complete, and delete them..."
+          rows="4"></textarea>
+        <div class="examples">
+          <span class="example-chip" onclick="fillExample(this)">📦 E-commerce store</span>
+          <span class="example-chip" onclick="fillExample(this)">📝 Blog platform</span>
+          <span class="example-chip" onclick="fillExample(this)">✅ Todo app</span>
+          <span class="example-chip" onclick="fillExample(this)">💬 Chat app</span>
+          <span class="example-chip" onclick="fillExample(this)">📊 Dashboard</span>
+        </div>
+        <div class="input-footer">
+          <span class="input-hint">React + Flask + PostgreSQL · ZIP download</span>
+          <button class="build-btn" id="buildBtn" onclick="startBuild()">
+            <span>⚡</span> Build My App
+          </button>
+        </div>
+      </div>
+
+      <div class="progress-section" id="progressSection">
+        <div class="progress-header">
+          <span class="progress-label">BUILDING YOUR PROJECT</span>
+          <span class="progress-status" id="progressStatus">Initializing...</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill" id="progressBar"></div>
+        </div>
+        <div class="log-terminal" id="logTerminal"></div>
+      </div>
+
+      <div class="download-section" id="downloadSection">
+        <div class="download-box">
+          <div class="download-info">
+            <span class="download-title">✓ Your app is ready</span>
+            <span class="download-meta" id="downloadMeta">Loading...</span>
+          </div>
+          <a class="download-btn" id="downloadBtn" href="#" download>↓ Download ZIP</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="stats">
+    <div class="stat"><span class="stat-number">~2min</span><span class="stat-label">Build Time</span></div>
+    <div class="stat"><span class="stat-number">10+</span><span class="stat-label">Files Generated</span></div>
+    <div class="stat"><span class="stat-number">100%</span><span class="stat-label">Free Forever</span></div>
+  </div>
+
+  <div class="features">
+    <div class="feature-card">
+      <span class="feature-icon">🧠</span>
+      <div class="feature-title">AI Planner</div>
+      <p class="feature-desc">Breaks your description into a full project blueprint with files, routes, and database schema.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">⚡</span>
+      <div class="feature-title">Self-Healing Code</div>
+      <p class="feature-desc">If generated code has errors, the agent detects and fixes them automatically.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">📦</span>
+      <div class="feature-title">Ready to Run</div>
+      <p class="feature-desc">Get a complete ZIP with backend, frontend, database models, and setup instructions.</p>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = 'http://127.0.0.1:8000';
+    const examples = {
+      '📦 E-commerce store': 'An e-commerce store where users can browse products, add them to cart, and place orders.',
+      '📝 Blog platform': 'A blog platform where users can create posts, add tags, and comment on articles.',
+      '✅ Todo app': 'A todo app where users can add tasks, mark them complete, set due dates, and delete them.',
+      '💬 Chat app': 'A real-time chat app where users can create rooms and send messages.',
+      '📊 Dashboard': 'An analytics dashboard that displays charts and metrics from a REST API.',
+    };
+
+    function fillExample(el) {
+      document.getElementById('prompt').value = examples[el.textContent.trim()] || '';
+    }
+
+    function addLog(text, type = '') {
+      const terminal = document.getElementById('logTerminal');
+      const line = document.createElement('div');
+      line.className = 'log-line';
+      line.innerHTML = `<span class="log-prefix">›</span><span class="log-text ${type}">${text}</span>`;
+      terminal.appendChild(line);
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function setProgress(pct, status) {
+      document.getElementById('progressBar').style.width = pct + '%';
+      document.getElementById('progressStatus').textContent = status;
+    }
+
+    async function startBuild() {
+      const prompt = document.getElementById('prompt').value.trim();
+      if (!prompt) { document.getElementById('prompt').focus(); return; }
+
+      const btn = document.getElementById('buildBtn');
+      btn.disabled = true;
+      btn.innerHTML = '<span>⏳</span> Building...';
+
+      document.getElementById('progressSection').classList.add('visible');
+      document.getElementById('downloadSection').classList.remove('visible');
+      document.getElementById('logTerminal').innerHTML = '';
+
+      setProgress(5, 'Starting...');
+      addLog('Received project description', 'muted');
+
+      const steps = [
+        [15, 'Generating blueprint...', '🧠 Planning project architecture'],
+        [30, 'Planning files...', '📁 Defining file structure'],
+        [45, 'Writing backend...', '⚙️  Building Flask API'],
+        [60, 'Writing models...', '🗄️  Creating database models'],
+        [72, 'Writing routes...', '🔗 Generating API endpoints'],
+        [82, 'Writing frontend...', '⚛️  Building React components'],
+        [90, 'Finalizing...', '📦 Packaging project files'],
+      ];
+
+      let i = 0;
+      const timer = setInterval(() => {
+        if (i < steps.length) {
+          setProgress(steps[i][0], steps[i][1]);
+          addLog(steps[i][2], 'muted');
+          i++;
+        }
+      }, 2500);
+
+      try {
+        const res = await fetch(`${API_URL}/build`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ description: prompt })
+        });
+        clearInterval(timer);
+        if (!res.ok) throw new Error('Build failed');
+        const data = await res.json();
+
+        setProgress(100, 'Complete!');
+        addLog(`✓ Blueprint: ${data.project_name}`, 'success');
+        addLog(`✓ Files built: ${data.files_built}`, 'success');
+        if (data.files_failed > 0) addLog(`⚠ ${data.files_failed} file(s) had issues`, 'error');
+        addLog('✓ ZIP ready for download', 'success');
+
+        document.getElementById('downloadMeta').textContent =
+          `${data.project_name} · ${data.files_built} files · React + Flask + PostgreSQL`;
+        document.getElementById('downloadBtn').href = `${API_URL}${data.download_url}`;
+        document.getElementById('downloadSection').classList.add('visible');
+      } catch (err) {
+        clearInterval(timer);
+        setProgress(0, 'Failed');
+        addLog('✗ Build failed — is the server running?', 'error');
+        addLog('Run: python3 -m uvicorn api.server:app --port 8000', 'muted');
+      }
+
+      btn.disabled = false;
+      btn.innerHTML = '<span>⚡</span> Build My App';
+    }
+
+    document.getElementById('prompt').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && e.metaKey) startBuild();
+    });
+  </script>
+</body>
+</html>
