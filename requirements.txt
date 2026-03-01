@@ -2,7 +2,6 @@ fastapi
 uvicorn
 groq
 chromadb
-sentence-transformers
 python-dotenv
 flask
 flask-cors
