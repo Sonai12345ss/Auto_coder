@@ -69,14 +69,22 @@ async def build(request: ProjectRequest):
         "blueprint": blueprint
     }
 
-@app.get("/download/{project_name}")
-async def download(project_name: str):
-    """Returns the ZIP file for download."""
-    zip_path = f"sandbox/projects/{project_name}.zip"
-    if not os.path.exists(zip_path):
+@app.get("/files/{project_name}")
+async def get_files(project_name: str):
+    """Returns all generated file contents for preview."""
+    project_path = f"sandbox/projects/{project_name}"
+    if not os.path.exists(project_path):
         raise HTTPException(status_code=404, detail="Project not found")
-    return FileResponse(
-        path=zip_path,
-        filename=f"{project_name}.zip",
-        media_type="application/zip"
-    )
+    
+    files = {}
+    for root, dirs, filenames in os.walk(project_path):
+        for filename in filenames:
+            file_full_path = os.path.join(root, filename)
+            arcname = os.path.relpath(file_full_path, project_path)
+            try:
+                with open(file_full_path, "r", encoding="utf-8") as f:
+                    files[arcname] = f.read()
+            except:
+                files[arcname] = "# Binary or unreadable file"
+    
+    return {"project_name": project_name, "files": files}
