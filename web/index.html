@@ -468,7 +468,12 @@
         // Show results
         document.getElementById('resultsSection').classList.add('visible');
         document.getElementById('downloadMeta').textContent=`${data.project_name} · ${data.files_built} files · React + Flask + PostgreSQL`;
-        document.getElementById('downloadBtn').href=`${API_URL}${data.download_url}`;
+        const zipBytes = atob(data.zip_b64);
+        const zipArray = new Uint8Array(zipBytes.length);
+        for(let i = 0; i < zipBytes.length; i++) zipArray[i] = zipBytes.charCodeAt(i);
+        const blob = new Blob([zipArray], {type: 'application/zip'});
+        document.getElementById('downloadBtn').href = URL.createObjectURL(blob);
+        document.getElementById('downloadBtn').download = `${data.project_name}.zip`;
         document.getElementById('downloadSection').classList.add('visible');
       }catch(err){
         clearInterval(timer);
