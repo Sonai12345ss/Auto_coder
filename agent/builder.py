@@ -9,49 +9,105 @@ load_dotenv()
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 BUILDER_PROMPT = """
-You are an expert full stack developer. Your job is to write a single file as part of a larger project.
+You are a senior full stack engineer with 10+ years of experience. You write production-grade code that is secure, maintainable, and complete. Your job is to write a single file as part of a larger project.
 
-RULES:
-1. Output ONLY the raw code. No explanation, no markdown, no backticks.
-2. The code must be complete and production ready.
-3. Stay consistent with the blueprint provided.
-4. Make sure imports match the actual file structure.
+ABSOLUTE RULES:
+1. Output ONLY raw code. Zero explanation, zero markdown, zero backticks.
+2. Every file must be 100% complete — no placeholders, no "TODO", no "pass", no "..." ellipsis.
+3. Never write stub functions. Every function must have real, working logic.
+4. Stay consistent with the blueprint: use exact model names, field names, and endpoint paths provided.
+5. All imports must be correct and match the actual file structure.
 
-SPECIFIC RULES BY FILE TYPE:
+═══════════════════════════════════════════
+BACKEND RULES (Flask/Python)
+═══════════════════════════════════════════
 
 For backend/config.py:
-- Read DATABASE_URL from environment variables using os.environ.get()
-- Include DEBUG, SECRET_KEY, and SQLALCHEMY_DATABASE_URI settings
-- Use a default SQLite URL as fallback for development
+- Load all config from environment variables using os.environ.get()
+- Include: SECRET_KEY, DATABASE_URL (fallback to SQLite), DEBUG, JWT_SECRET_KEY
+- Set JWT_ACCESS_TOKEN_EXPIRES to timedelta(hours=24)
+- Set SQLALCHEMY_TRACK_MODIFICATIONS = False
 
 For backend/models.py:
-- Use Flask-SQLAlchemy
-- Always add a to_dict() method to every model
-- In to_dict(), convert datetime fields using .isoformat()
+- Use Flask-SQLAlchemy with proper column types (String, Integer, Float, Boolean, DateTime, Text)
+- Every model MUST have: id (primary key), created_at (DateTime, default=datetime.utcnow)
+- Every string field MUST have a max length: String(100), String(255), etc.
+- Add db.Index() for any foreign key column for query performance
+- Add __repr__ for every model
+- to_dict() method must include ALL fields, converting datetime with .isoformat()
+- Hash passwords using werkzeug.security.generate_password_hash — NEVER store plain text passwords
+- Add a check_password(password) method to any User model
 
 For backend/routes.py:
-- You MUST generate ALL endpoints listed in the blueprint api_endpoints
-- For every resource, generate GET (list), GET (single), POST (create), PUT (update), DELETE endpoints
-- Never skip any endpoint from the blueprint
+- Generate EVERY endpoint from the blueprint api_endpoints — never skip any
+- Every POST/PUT endpoint MUST validate required fields and return 400 with clear error messages if missing
+- Every GET list endpoint MUST support pagination: ?page=1&per_page=20 using .paginate()
+- Return paginated responses as: {"items": [...], "total": n, "page": n, "pages": n}
+- Every DELETE endpoint returns {"message": "Deleted successfully"}
+- Use proper HTTP status codes: 200, 201, 400, 401, 403, 404, 409, 500
+- Wrap all database writes in try/except, return 500 on db errors with db.session.rollback()
+- Use @jwt_required() decorator to protect any route that modifies data
+- Add CORS-safe responses using flask_cors
 
 For backend/app.py:
-- Import config from backend.config
-- Register blueprints from backend.routes
-- Initialize db with app
+- Create app factory pattern: def create_app()
+- Initialize extensions: db, jwt, CORS
+- Register blueprints
+- Add a health check route: GET /health returns {"status": "ok"}
+- if __name__ == "__main__": app.run(debug=True, port=5000)
 
-For frontend/package.json:
-- Include react, react-dom, react-scripts, axios as dependencies
-- Include start, build, test scripts
+For requirements.txt:
+- Include: flask, flask-cors, flask-sqlalchemy, flask-jwt-extended, sqlalchemy, psycopg2-binary, python-dotenv, werkzeug
 
-For frontend/src/index.css:
-- Write clean minimal CSS, basic body and app styles only
+═══════════════════════════════════════════
+FRONTEND RULES (React)
+═══════════════════════════════════════════
 
-For .env.example:
-- Include DATABASE_URL, SECRET_KEY, DEBUG, FLASK_ENV
+For frontend/src/App.js:
+- MUST contain real routing using React Router v6 (BrowserRouter, Routes, Route)
+- Include routes for every major page inferred from the blueprint
+- Include a Navbar component with navigation links
+- Handle auth state: check localStorage for JWT token, show login/logout accordingly
+- Every page component must be imported and rendered — no empty shells
 
 For frontend/src/api.js:
-- Use axios with baseURL pointing to http://localhost:5000
-- Export individual functions for each API endpoint
+- Use axios with baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000'
+- Add axios request interceptor to inject Authorization: Bearer <token> from localStorage
+- Add axios response interceptor: on 401, clear localStorage and redirect to /login
+- Export individual async functions for EVERY API endpoint in the blueprint
+- Each function uses try/catch and re-throws errors for the caller to handle
+
+For frontend/src/components/ files:
+- Every component must use React hooks: useState for local state, useEffect for data fetching
+- Every component that fetches data must show: loading spinner while loading, error message on failure, empty state when no data
+- Forms must have controlled inputs with onChange handlers and onSubmit with preventDefault()
+- Forms must show validation errors inline before submitting
+- After successful POST/PUT/DELETE, refresh the data list automatically
+- Use async/await for all API calls, wrapped in try/catch with proper error state
+
+For frontend/package.json:
+- Include: react, react-dom, react-scripts, axios, react-router-dom as dependencies
+- Include start, build, test scripts
+- Set proxy: "http://localhost:5000" for development
+
+For frontend/src/index.css:
+- Write a complete, modern CSS stylesheet
+- Use CSS variables for colors, font sizes, spacing
+- Style: body, buttons (primary/secondary/danger), forms, inputs, tables, cards, navbar, loading spinner, error messages
+- Make it responsive with at least one @media (max-width: 768px) breakpoint
+- Use a clean color scheme — not just black and white
+
+═══════════════════════════════════════════
+GENERAL FILES
+═══════════════════════════════════════════
+
+For .env.example:
+- Include: DATABASE_URL, SECRET_KEY, JWT_SECRET_KEY, DEBUG, FLASK_ENV, REACT_APP_API_URL
+
+For README.md:
+- Include: project description, tech stack, prerequisites, setup steps (backend + frontend), environment variables table, API endpoints table with method/path/description/auth columns
+
+QUALITY BAR: The code you write must be indistinguishable from code written by a senior engineer at a real software company. It must be immediately runnable with no modifications needed beyond filling in .env values.
 """
 
 def build_file(file_info, blueprint, project_path, existing_files={}):
@@ -79,8 +135,8 @@ def build_file(file_info, blueprint, project_path, existing_files={}):
     user_prompt = f"""
 Project: {blueprint['description']}
 Stack: {blueprint['stack']}
-Database tables: {blueprint['database_schema']['tables']}
-API endpoints: {blueprint['api_endpoints']}
+Database tables: {json.dumps(blueprint['database_schema']['tables'], indent=2)}
+API endpoints: {json.dumps(blueprint['api_endpoints'], indent=2)}
 
 File to write: {file_path}
 Purpose: {file_description}
@@ -90,7 +146,8 @@ Dependencies already written:
 
 {memory_context}
 
-Write the complete code for {file_path} now.
+Write the COMPLETE, PRODUCTION-READY code for {file_path} now.
+Remember: No placeholders, no TODOs, no stubs. Real working code only.
 """
 
     history = [
@@ -108,17 +165,24 @@ Write the complete code for {file_path} now.
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=history,
-            temperature=0.2
+            temperature=0.15,
+            max_tokens=4096
         )
 
         code = response.choices[0].message.content.strip()
 
         # Clean up backticks if model adds them
         if "```" in code:
-            for lang in ["```python", "```javascript", "```html", "```json", "```"]:
-                if lang in code:
-                    code = code.split(lang)[1].split("```")[0].strip()
-                    break
+            lines = code.split('\n')
+            clean_lines = []
+            inside_block = False
+            for line in lines:
+                if line.startswith("```"):
+                    inside_block = not inside_block
+                    continue
+                if inside_block or not line.startswith("```"):
+                    clean_lines.append(line)
+            code = '\n'.join(clean_lines).strip()
 
         # Write file to project
         full_path = os.path.join(project_path, file_path)
@@ -132,16 +196,14 @@ Write the complete code for {file_path} now.
             if "syntax ok" in result["stdout"]:
                 print(f"  ✅ {file_path} built successfully")
                 final_code = code
-                # Save to memory
                 add_experience(file_description, code, error=last_error)
                 return code
             else:
                 last_error = result["stderr"]
                 print(f"  ❌ Syntax error: {last_error[:100]}")
                 history.append({"role": "assistant", "content": code})
-                history.append({"role": "user", "content": f"Syntax error:\n{last_error}\nFix it."})
+                history.append({"role": "user", "content": f"Syntax error found:\n{last_error}\n\nFix the syntax error and output the complete corrected file."})
         else:
-            # For JS/HTML files just accept the output
             print(f"  ✅ {file_path} built successfully")
             final_code = code
             return code
@@ -164,7 +226,6 @@ def build_project(blueprint, output_dir="sandbox/projects"):
     failed_files = []
 
     # Sort files by dependency order
-    # Files with no dependencies get built first
     files = blueprint["files"]
     ordered_files = sorted(files, key=lambda f: len(f.get("depends_on", [])))
 
@@ -188,6 +249,7 @@ flask-jwt-extended
 sqlalchemy
 psycopg2-binary
 python-dotenv
+werkzeug
 """
     with open(os.path.join(project_path, "requirements.txt"), "w") as f:
         f.write(requirements)
@@ -203,10 +265,48 @@ python-dotenv
 - Backend: {blueprint['stack']['backend']}
 - Database: {blueprint['stack']['database']}
 
+## Prerequisites
+- Python 3.9+
+- Node.js 16+
+- PostgreSQL
+
 ## Setup
+
+### Backend
+```bash
+cd backend
+python -m venv venv
+source venv/bin/activate  # Windows: venv\\Scripts\\activate
+pip install -r requirements.txt
+cp .env.example .env      # Fill in your values
+flask db init && flask db migrate && flask db upgrade
+python app.py
+```
+
+### Frontend
+```bash
+cd frontend
+npm install
+cp .env.example .env      # Set REACT_APP_API_URL
+npm start
+```
+
+## Environment Variables
+| Variable | Description | Example |
+|----------|-------------|---------|
+| DATABASE_URL | PostgreSQL connection string | postgresql://user:pass@localhost/dbname |
+| SECRET_KEY | Flask secret key | your-secret-key |
+| JWT_SECRET_KEY | JWT signing key | your-jwt-secret |
+| DEBUG | Debug mode | True |
+| FLASK_ENV | Flask environment | development |
+| REACT_APP_API_URL | Backend URL for React | http://localhost:5000 |
+
+## API Endpoints
 """
-    for step in blueprint["setup_instructions"]:
-        readme += f"- {step}\n"
+    for endpoint in blueprint.get("api_endpoints", []):
+        if isinstance(endpoint, dict):
+            auth = "🔒" if endpoint.get("auth_required") else "🔓"
+            readme += f"| {endpoint.get('method','GET')} | {endpoint.get('path','/')} | {endpoint.get('description','')} | {auth} |\n"
 
     with open(os.path.join(project_path, "README.md"), "w") as f:
         f.write(readme)
