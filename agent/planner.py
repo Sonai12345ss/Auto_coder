@@ -207,7 +207,7 @@ def generate_blueprint(project_description):
             component_names = re.findall(r'\b([A-Z][a-zA-Z]+)\b', desc)
             for name in component_names:
                 component_path = f"frontend/src/components/{name}.js"
-                if component_path not in existing_paths and name not in ["React", "Route", "Routes", "BrowserRouter"]:
+                if component_path not in existing_paths and name not in ["React", "Route", "Routes", "BrowserRouter", "Navigate", "Routing", "Link", "NavLink", "App"]:
                     print(f"⚠️  Auto-adding component from App.js description: {component_path}")
                     blueprint["files"].append({
                         "path": component_path,
