@@ -2,12 +2,71 @@ import os
 import time
 import json
 from groq import Groq
+from openai import OpenAI
 from dotenv import load_dotenv
 from agent.tools import write_file, read_file, execute_python_code
 from agent.memory import query_experience, add_experience
 
 load_dotenv()
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+# Primary: Groq (fast, free, 100k tokens/day)
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+# Fallback: OpenRouter (free models, separate rate limits)
+openrouter_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+)
+
+# Provider chain — tries each in order when previous hits rate limit
+PROVIDERS = [
+    {
+        "name": "Groq / llama-3.3-70b",
+        "call": lambda msgs, mt: groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=msgs, temperature=0.15, max_tokens=mt
+        )
+    },
+    {
+        "name": "OpenRouter / llama-3.3-70b",
+        "call": lambda msgs, mt: openrouter_client.chat.completions.create(
+            model="meta-llama/llama-3.3-70b-instruct:free",
+            messages=msgs, temperature=0.15, max_tokens=mt
+        )
+    },
+    {
+        "name": "OpenRouter / gemini-flash",
+        "call": lambda msgs, mt: openrouter_client.chat.completions.create(
+            model="google/gemini-flash-1.5",
+            messages=msgs, temperature=0.15, max_tokens=mt
+        )
+    },
+    {
+        "name": "OpenRouter / mistral-7b",
+        "call": lambda msgs, mt: openrouter_client.chat.completions.create(
+            model="mistralai/mistral-7b-instruct:free",
+            messages=msgs, temperature=0.15, max_tokens=mt
+        )
+    },
+]
+
+def call_llm(messages, max_tokens=2048):
+    """Try each provider in order. If rate limited, move to next automatically."""
+    last_error = None
+    for provider in PROVIDERS:
+        try:
+            print(f"  🤖 Using {provider['name']}...")
+            return provider["call"](messages, max_tokens)
+        except Exception as e:
+            err = str(e)
+            if "rate_limit" in err or "429" in err or "quota" in err.lower():
+                print(f"  ⚠️  {provider['name']} rate limited, trying next...")
+                last_error = e
+                time.sleep(2)
+                continue
+            else:
+                raise
+    raise Exception(f"All providers rate limited. Last error: {last_error}")
 
 BUILDER_PROMPT = """
 You are a senior full stack engineer with 10+ years of experience. You write production-grade code that is secure, maintainable, and complete. Your job is to write a single file as part of a larger project.
@@ -163,26 +222,10 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
         if attempt > 1:
             print(f"  🔄 Retry attempt {attempt}...")
 
-        response = None
-        for wait in [60, 120, 300]:
-            try:
-                response = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=history,
-                    temperature=0.15,
-                    max_tokens=2048
-                )
-                break
-            except Exception as e:
-                if "rate_limit" in str(e) or "429" in str(e):
-                    print(f"  ⏳ Rate limit hit — waiting {wait}s...")
-                    time.sleep(wait)
-                else:
-                    print(f"  ❌ API error: {str(e)[:100]}")
-                    return final_code
-
-        if response is None:
-            print(f"  ❌ Rate limit exhausted, skipping {file_path}")
+        try:
+            response = call_llm(history, max_tokens=2048)
+        except Exception as e:
+            print(f"  ❌ All providers failed: {str(e)[:120]}")
             return final_code
 
         code = response.choices[0].message.content.strip()
