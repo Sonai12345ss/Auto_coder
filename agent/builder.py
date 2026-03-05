@@ -1,4 +1,5 @@
 import os
+import time
 import json
 from groq import Groq
 from dotenv import load_dotenv
@@ -162,12 +163,27 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
         if attempt > 1:
             print(f"  🔄 Retry attempt {attempt}...")
 
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=history,
-            temperature=0.15,
-            max_tokens=4096
-        )
+        response = None
+        for wait in [60, 120, 300]:
+            try:
+                response = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=history,
+                    temperature=0.15,
+                    max_tokens=2048
+                )
+                break
+            except Exception as e:
+                if "rate_limit" in str(e) or "429" in str(e):
+                    print(f"  ⏳ Rate limit hit — waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    print(f"  ❌ API error: {str(e)[:100]}")
+                    return final_code
+
+        if response is None:
+            print(f"  ❌ Rate limit exhausted, skipping {file_path}")
+            return final_code
 
         code = response.choices[0].message.content.strip()
 
