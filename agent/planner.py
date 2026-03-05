@@ -11,21 +11,41 @@ You are a senior software architect. Your job is to take a project description a
 
 RULES:
 1. Output ONLY valid JSON, nothing else. No explanation, no markdown, no backticks.
-2. Every Flask project MUST include these backend files:
-   - backend/config.py (database URL and app config)
-   - backend/models.py (SQLAlchemy models)
-   - backend/routes.py (API endpoints)
-   - backend/app.py (main Flask app)
-3. Every React project MUST include these frontend files:
-   - frontend/package.json (dependencies)
-   - frontend/src/index.js (entry point)
-   - frontend/src/index.css (basic styles)
-   - frontend/src/api.js (axios API client)
-4. Always include a .env.example file showing required environment variables.
-5. Never generate database.py separately — all database logic goes in models.py.
-6. All datetime fields in routes must use .isoformat() for JSON serialization.
+2. Every file that is IMPORTED by another file MUST be listed in the files array.
+3. App.js imports components — every component it imports MUST have its own file entry.
+4. NEVER import a component in App.js that is not listed as a file to be generated.
 
-OUTPUT FORMAT:
+BACKEND FILES (always include all of these):
+- backend/config.py — database URL, SECRET_KEY, JWT_SECRET_KEY, debug settings
+- backend/models.py — SQLAlchemy models with password hashing, to_dict(), created_at
+- backend/routes.py — ALL API endpoints including /api/register, /api/login, /api/user
+- backend/app.py — Flask app factory, register blueprints, init db and JWT
+
+FRONTEND FILES (always include all of these):
+- frontend/package.json — react, react-dom, react-scripts, axios, react-router-dom
+- frontend/src/index.js — ReactDOM.render entry point
+- frontend/src/index.css — complete stylesheet with variables, buttons, forms, navbar, cards
+- frontend/src/App.js — routing with BrowserRouter, Routes, Route for every page
+- frontend/src/api.js — axios instance with JWT interceptor, one function per endpoint
+
+FRONTEND COMPONENT FILES (generate based on the project — include ALL of these):
+- frontend/src/components/Navbar.js — navigation bar with auth state (login/logout links)
+- frontend/src/components/Login.js — login form with controlled inputs, error handling
+- frontend/src/components/Register.js — register form with validation
+- For each main resource in the project, generate:
+  - frontend/src/components/[Resource]List.js — list view with loading/error/empty states
+  - frontend/src/components/[Resource]Form.js — create/edit form with validation
+  - frontend/src/components/[Resource]Detail.js — detail/single view (if needed)
+- frontend/src/components/Home.js — landing/home page component
+
+CRITICAL RULES FOR FILES:
+- App.js must ONLY import components that exist in the files list
+- Every component listed must have a complete, working implementation
+- routes.py MUST include /api/register (POST), /api/login (POST), /api/user (GET)
+- All list endpoints must support ?page=1&per_page=20 pagination
+- All write endpoints must use @jwt_required() and validate input fields
+
+OUTPUT FORMAT — output exactly this JSON structure:
 {
   "project_name": "snake_case_name",
   "description": "one line description",
@@ -37,56 +57,78 @@ OUTPUT FORMAT:
   "files": [
     {
       "path": "backend/config.py",
-      "description": "Flask config with DATABASE_URL from environment variables",
+      "description": "Flask config with DATABASE_URL, SECRET_KEY, JWT_SECRET_KEY from env",
       "depends_on": []
     },
     {
       "path": "backend/models.py",
-      "description": "SQLAlchemy models",
+      "description": "SQLAlchemy models with password hashing via werkzeug, to_dict(), created_at on every model",
       "depends_on": ["backend/config.py"]
     },
     {
       "path": "backend/routes.py",
-      "description": "API endpoints, all datetime fields must use .isoformat() for JSON serialization",
+      "description": "All API endpoints including /api/register, /api/login, /api/user plus all resource endpoints with pagination and JWT protection",
       "depends_on": ["backend/models.py"]
     },
     {
       "path": "backend/app.py",
-      "description": "Main Flask app entry point",
+      "description": "Flask app factory pattern, init db/jwt/cors, register blueprint, health check route",
       "depends_on": ["backend/config.py", "backend/models.py", "backend/routes.py"]
     },
     {
       "path": "frontend/package.json",
-      "description": "React app dependencies including axios and react-scripts",
+      "description": "React dependencies: react, react-dom, react-scripts, axios, react-router-dom",
       "depends_on": []
     },
     {
       "path": "frontend/src/index.css",
-      "description": "Basic global styles",
+      "description": "Complete stylesheet with CSS variables, body, buttons, forms, inputs, navbar, cards, loading spinner, error states, responsive breakpoints",
       "depends_on": []
     },
     {
       "path": "frontend/src/api.js",
-      "description": "Axios API client matching all backend endpoints",
+      "description": "Axios instance with baseURL, JWT request interceptor, 401 response interceptor, one async function per API endpoint",
       "depends_on": []
     },
     {
-      "path": "frontend/src/index.js",
-      "description": "React entry point",
+      "path": "frontend/src/components/Navbar.js",
+      "description": "Navbar component with navigation links, shows login/register when logged out, shows username and logout button when logged in",
       "depends_on": ["frontend/src/api.js"]
     },
     {
-      "path": ".env.example",
-      "description": "Example environment variables",
+      "path": "frontend/src/components/Home.js",
+      "description": "Home page component with welcome message and links to main features",
       "depends_on": []
+    },
+    {
+      "path": "frontend/src/components/Login.js",
+      "description": "Login form with email and password controlled inputs, onSubmit calls api login, shows inline error, calls onLogin prop with token on success",
+      "depends_on": ["frontend/src/api.js"]
+    },
+    {
+      "path": "frontend/src/components/Register.js",
+      "description": "Register form with username, email, password fields, validation, calls api register, redirects to login on success",
+      "depends_on": ["frontend/src/api.js"]
     }
   ],
   "database_schema": {
-    "tables": ["table1", "table2"]
+    "tables": [
+      {
+        "name": "users",
+        "columns": [
+          {"name": "id", "type": "Integer PK"},
+          {"name": "username", "type": "String(100)"},
+          {"name": "email", "type": "String(255)"},
+          {"name": "password", "type": "String(255)"},
+          {"name": "created_at", "type": "DateTime"}
+        ]
+      }
+    ]
   },
   "api_endpoints": [
-    "GET /api/resource",
-    "POST /api/resource"
+    {"method": "POST", "path": "/api/register", "description": "Register new user", "auth_required": false},
+    {"method": "POST", "path": "/api/login", "description": "Login and get JWT token", "auth_required": false},
+    {"method": "GET", "path": "/api/user", "description": "Get current user info", "auth_required": true}
   ],
   "setup_instructions": [
     "Copy .env.example to .env and fill in your values",
@@ -95,6 +137,9 @@ OUTPUT FORMAT:
     "cd frontend && npm install && npm start"
   ]
 }
+
+IMPORTANT: The files array in your output must include ALL component files that App.js will import.
+Add resource-specific components based on the project (e.g. for a todo app add TodoList.js, TodoForm.js).
 """
 
 REQUIRED_FILES = [
@@ -107,8 +152,13 @@ REQUIRED_FILES = [
     "frontend/src/index.css",
     "frontend/src/api.js",
     "frontend/src/index.js",
+    "frontend/src/components/Navbar.js",
+    "frontend/src/components/Login.js",
+    "frontend/src/components/Register.js",
+    "frontend/src/components/Home.js",
     ".env.example"
 ]
+
 
 def generate_blueprint(project_description):
     """Takes a project description and returns a structured JSON blueprint."""
@@ -118,9 +168,10 @@ def generate_blueprint(project_description):
         model="llama-3.3-70b-versatile",
         messages=[
             {"role": "system", "content": PLANNER_PROMPT},
-            {"role": "user", "content": f"Create a blueprint for: {project_description}"}
+            {"role": "user", "content": f"Create a complete blueprint for: {project_description}\n\nRemember: every component that App.js imports MUST be in the files list."}
         ],
-        temperature=0.3
+        temperature=0.2,
+        max_tokens=4096
     )
 
     raw = response.choices[0].message.content.strip()
@@ -145,10 +196,36 @@ def generate_blueprint(project_description):
                     "depends_on": []
                 })
 
+        # KEY FIX: Parse App.js description to find any extra components mentioned
+        # and ensure they are in the files list
+        app_js_entry = next((f for f in blueprint["files"] if f["path"] == "frontend/src/App.js"), None)
+        if app_js_entry:
+            existing_paths = [f["path"] for f in blueprint["files"]]
+            desc = app_js_entry.get("description", "")
+            # Find component names mentioned in the description
+            import re
+            component_names = re.findall(r'\b([A-Z][a-zA-Z]+)\b', desc)
+            for name in component_names:
+                component_path = f"frontend/src/components/{name}.js"
+                if component_path not in existing_paths and name not in ["React", "Route", "Routes", "BrowserRouter"]:
+                    print(f"⚠️  Auto-adding component from App.js description: {component_path}")
+                    blueprint["files"].append({
+                        "path": component_path,
+                        "description": f"{name} component used in App.js routing",
+                        "depends_on": ["frontend/src/api.js"]
+                    })
+
+        # Sort files by dependency order
+        blueprint["files"] = sorted(
+            blueprint["files"],
+            key=lambda f: len(f.get("depends_on", []))
+        )
+
         print(f"✅ Blueprint generated: {blueprint['project_name']}")
         print(f"📁 Files to create: {len(blueprint['files'])}")
-        print(f"🗄️  Database tables: {blueprint['database_schema']['tables']}")
+        print(f"🗄️  Database tables: {[t['name'] if isinstance(t, dict) else t for t in blueprint['database_schema']['tables']]}")
         print(f"🔗 API endpoints: {len(blueprint['api_endpoints'])}")
+        print(f"📦 Components: {[f['path'].split('/')[-1] for f in blueprint['files'] if 'components/' in f['path']]}")
         return blueprint
 
     except json.JSONDecodeError as e:
@@ -160,9 +237,11 @@ def generate_blueprint(project_description):
 # Test it
 if __name__ == "__main__":
     blueprint = generate_blueprint(
-        "A simple todo app where users can add, complete, and delete tasks"
+        "A real-time chat app where users can create rooms and send messages"
     )
     if blueprint:
+        import os
+        os.makedirs("sandbox", exist_ok=True)
         with open("sandbox/blueprint.json", "w") as f:
             json.dump(blueprint, f, indent=2)
         print("\n📄 Blueprint saved to sandbox/blueprint.json")
