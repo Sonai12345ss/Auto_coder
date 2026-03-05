@@ -28,16 +28,16 @@ PROVIDERS = [
         )
     },
     {
-        "name": "OpenRouter / llama-3.3-70b",
+        "name": "OpenRouter / llama-3.1-8b",
         "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="meta-llama/llama-3.3-70b-instruct:free",
+            model="meta-llama/llama-3.1-8b-instruct:free",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
     {
-        "name": "OpenRouter / gemini-flash",
+        "name": "OpenRouter / gemini-2.0-flash",
         "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="google/gemini-flash-1.5",
+            model="google/gemini-2.0-flash-exp:free",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
@@ -49,7 +49,6 @@ PROVIDERS = [
         )
     },
 ]
-
 def call_llm(messages, max_tokens=2048):
     """Try each provider in order. If rate limited, move to next automatically."""
     last_error = None
@@ -59,7 +58,7 @@ def call_llm(messages, max_tokens=2048):
             return provider["call"](messages, max_tokens)
         except Exception as e:
             err = str(e)
-            if "rate_limit" in err or "429" in err or "quota" in err.lower():
+            if "rate_limit" in err or "429" in err or "quota" in err.lower() or "404" in err or "No endpoints" in err:
                 print(f"  ⚠️  {provider['name']} rate limited, trying next...")
                 last_error = e
                 time.sleep(2)
