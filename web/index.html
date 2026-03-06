@@ -444,7 +444,12 @@
       let i=0;
       const timer=setInterval(()=>{if(i<steps.length){setProgress(steps[i][0],steps[i][1]);addLog(steps[i][2],'muted');i++;}},2500);
       try{
-        const res=await fetch(`${API_URL}/build`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:prompt})});
+        const res = await fetch(API_URL + '/build', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({description: prompt}),
+              signal: AbortSignal.timeout(300000)  // 5 minute timeout
+          });
         clearInterval(timer);
         if(!res.ok) throw new Error('Build failed');
         const data=await res.json();
