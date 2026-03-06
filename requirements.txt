@@ -10,3 +10,4 @@ flask-jwt-extended
 psycopg2-binary
 sqlalchemy
 python-multipart
+openai
