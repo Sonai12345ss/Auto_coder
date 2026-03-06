@@ -35,16 +35,30 @@ PROVIDERS = [
         )
     },
     {
-        "name": "OpenRouter / gemini-flash",
+        "name": "OpenRouter / mistral-small-24b",
         "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="google/gemini-flash-1.5",
+            model="mistralai/mistral-small-3.1-24b-instruct:free",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
     {
-        "name": "OpenRouter / mistral-7b",
+        "name": "OpenRouter / gemma-3-27b",
         "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="mistralai/mistral-7b-instruct:free",
+            model="google/gemma-3-27b-it:free",
+            messages=msgs, temperature=0.15, max_tokens=mt
+        )
+    },
+    {
+        "name": "OpenRouter / qwen3-coder",
+        "call": lambda msgs, mt: openrouter_client.chat.completions.create(
+            model="qwen/qwen3-coder:free",
+            messages=msgs, temperature=0.15, max_tokens=mt
+        )
+    },
+    {
+        "name": "OpenRouter / hermes-405b",
+        "call": lambda msgs, mt: openrouter_client.chat.completions.create(
+            model="nousresearch/hermes-3-llama-3.1-405b:free",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
