@@ -28,16 +28,16 @@ PROVIDERS = [
         )
     },
     {
-        "name": "OpenRouter / llama-3.1-8b",
+        "name": "OpenRouter / llama-3.3-70b",
         "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="meta-llama/llama-3.1-8b-instruct:free",
+            model="meta-llama/llama-3.3-70b-instruct:free",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
     {
-        "name": "OpenRouter / gemini-2.0-flash",
+        "name": "OpenRouter / gemini-flash",
         "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="google/gemini-2.0-flash-exp:free",
+            model="google/gemini-flash-1.5",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
@@ -49,6 +49,7 @@ PROVIDERS = [
         )
     },
 ]
+
 def call_llm(messages, max_tokens=2048):
     """Try each provider in order. If rate limited, move to next automatically."""
     last_error = None
@@ -58,7 +59,7 @@ def call_llm(messages, max_tokens=2048):
             return provider["call"](messages, max_tokens)
         except Exception as e:
             err = str(e)
-            if "rate_limit" in err or "429" in err or "quota" in err.lower() or "404" in err or "No endpoints" in err:
+            if "rate_limit" in err or "429" in err or "quota" in err.lower():
                 print(f"  ⚠️  {provider['name']} rate limited, trying next...")
                 last_error = e
                 time.sleep(2)
@@ -100,6 +101,9 @@ For backend/models.py:
 For backend/routes.py:
 - Generate EVERY endpoint from the blueprint api_endpoints — never skip any
 - Every POST/PUT endpoint MUST validate required fields and return 400 with clear error messages if missing
+- Login endpoint MUST accept username field (not email) to match the Register form: data.get('username'), data.get('password')
+- Register endpoint MUST accept: username, email, password
+- Login success response MUST return a JWT token: {"token": create_access_token(identity=user.id), "user": user.to_dict()}
 - Every GET list endpoint MUST support pagination: ?page=1&per_page=20 using .paginate()
 - Return paginated responses as: {"items": [...], "total": n, "page": n, "pages": n}
 - Every DELETE endpoint returns {"message": "Deleted successfully"}
@@ -113,6 +117,7 @@ For backend/app.py:
 - Initialize extensions: db, jwt, CORS
 - Register blueprints
 - Add a health check route: GET /health returns {"status": "ok"}
+- ALWAYS import jsonify from flask: from flask import Flask, jsonify
 - if __name__ == "__main__": app.run(debug=True, port=5000)
 
 For requirements.txt:
@@ -143,6 +148,14 @@ For frontend/src/components/ files:
 - Forms must show validation errors inline before submitting
 - After successful POST/PUT/DELETE, refresh the data list automatically
 - Use async/await for all API calls, wrapped in try/catch with proper error state
+- CRITICAL: NEVER import sub-components that are not explicitly listed in the blueprint files
+- NEVER import LoadingSpinner, Pagination, ErrorAlert, Post, Card or any helper component not in the file list
+- Write loading/error/empty/pagination logic INLINE using simple JSX and state
+- Loading inline: {loading && <div className="loading-spinner"></div>}
+- Error inline: {error && <div className="error-message">{error}</div>}
+- Empty inline: {items.length === 0 && <p>No items found.</p>}
+- Pagination inline: prev/next buttons using page state
+- ONLY import from: react, react-router-dom, ../api, ./CommentList, ./CommentForm (only if those files exist in blueprint)
 
 For frontend/package.json:
 - Include: react, react-dom, react-scripts, axios, react-router-dom as dependencies
