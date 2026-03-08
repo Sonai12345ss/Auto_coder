@@ -35,13 +35,6 @@ PROVIDERS = [
         )
     },
     {
-        "name": "OpenRouter / mistral-small-24b",
-        "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="mistralai/mistral-small-3.1-24b-instruct:free",
-            messages=msgs, temperature=0.15, max_tokens=mt
-        )
-    },
-    {
         "name": "OpenRouter / gemma-3-27b",
         "call": lambda msgs, mt: openrouter_client.chat.completions.create(
             model="google/gemma-3-27b-it:free",
@@ -49,16 +42,16 @@ PROVIDERS = [
         )
     },
     {
-        "name": "OpenRouter / qwen3-coder",
+        "name": "OpenRouter / gemma-3-12b",
         "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="qwen/qwen3-coder:free",
+            model="google/gemma-3-12b-it:free",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
     {
-        "name": "OpenRouter / hermes-405b",
+        "name": "OpenRouter / llama-3.2-3b",
         "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="nousresearch/hermes-3-llama-3.1-405b:free",
+            model="meta-llama/llama-3.2-3b-instruct:free",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
@@ -325,6 +318,7 @@ def build_project(blueprint, output_dir="sandbox/projects"):
             existing_files[file_info["path"]] = code
         else:
             failed_files.append(file_info["path"])
+        time.sleep(3)  # pause between files to avoid rate limits
 
     # Write requirements.txt
     requirements = """flask
