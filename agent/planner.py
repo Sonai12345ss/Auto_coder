@@ -11,6 +11,10 @@ openrouter_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.environ.get("OPENROUTER_API_KEY", ""),
 )
+gemini_client = OpenAI(
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    api_key=os.environ.get("GEMINI_API_KEY", ""),
+)
 
 def call_llm(messages):
     """Try each provider in order. If rate limited, move to next automatically."""
@@ -19,16 +23,16 @@ def call_llm(messages):
             model="llama-3.3-70b-versatile",
             messages=messages, temperature=0.2, max_tokens=4096
         )),
+        ("Gemini / gemini-2.0-flash", lambda: gemini_client.chat.completions.create(
+            model="gemini-2.0-flash",
+            messages=messages, temperature=0.2, max_tokens=4096
+        )),
         ("OpenRouter / llama-3.3-70b", lambda: openrouter_client.chat.completions.create(
             model="meta-llama/llama-3.3-70b-instruct:free",
             messages=messages, temperature=0.2, max_tokens=4096
         )),
         ("OpenRouter / gemma-3-27b", lambda: openrouter_client.chat.completions.create(
             model="google/gemma-3-27b-it:free",
-            messages=messages, temperature=0.2, max_tokens=4096
-        )),
-        ("OpenRouter / gemma-3-12b", lambda: openrouter_client.chat.completions.create(
-            model="google/gemma-3-12b-it:free",
             messages=messages, temperature=0.2, max_tokens=4096
         )),
     ]

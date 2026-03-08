@@ -12,7 +12,13 @@ load_dotenv()
 # Primary: Groq (fast, free, 100k tokens/day)
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-# Fallback: OpenRouter (free models, separate rate limits)
+# Fallback 1: Gemini (1M tokens/min, virtually unlimited)
+gemini_client = OpenAI(
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    api_key=os.environ.get("GEMINI_API_KEY", ""),
+)
+
+# Fallback 2: OpenRouter (free models, separate rate limits)
 openrouter_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.environ.get("OPENROUTER_API_KEY", ""),
@@ -24,6 +30,13 @@ PROVIDERS = [
         "name": "Groq / llama-3.3-70b",
         "call": lambda msgs, mt: groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
+            messages=msgs, temperature=0.15, max_tokens=mt
+        )
+    },
+    {
+        "name": "Gemini / gemini-2.0-flash",
+        "call": lambda msgs, mt: gemini_client.chat.completions.create(
+            model="gemini-2.0-flash",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
@@ -45,13 +58,6 @@ PROVIDERS = [
         "name": "OpenRouter / gemma-3-12b",
         "call": lambda msgs, mt: openrouter_client.chat.completions.create(
             model="google/gemma-3-12b-it:free",
-            messages=msgs, temperature=0.15, max_tokens=mt
-        )
-    },
-    {
-        "name": "OpenRouter / llama-3.2-3b",
-        "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="meta-llama/llama-3.2-3b-instruct:free",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
