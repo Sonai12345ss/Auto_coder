@@ -41,6 +41,20 @@ PROVIDERS = [
         )
     },
     {
+        "name": "Gemini / gemini-1.5-flash",
+        "call": lambda msgs, mt: gemini_client.chat.completions.create(
+            model="gemini-1.5-flash",
+            messages=msgs, temperature=0.15, max_tokens=mt
+        )
+    },
+    {
+        "name": "Gemini / gemini-2.0-flash-lite",
+        "call": lambda msgs, mt: gemini_client.chat.completions.create(
+            model="gemini-2.0-flash-lite",
+            messages=msgs, temperature=0.15, max_tokens=mt
+        )
+    },
+    {
         "name": "OpenRouter / llama-3.3-70b",
         "call": lambda msgs, mt: openrouter_client.chat.completions.create(
             model="meta-llama/llama-3.3-70b-instruct:free",
