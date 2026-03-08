@@ -41,9 +41,9 @@ PROVIDERS = [
         )
     },
     {
-        "name": "Gemini / gemini-1.5-flash",
+        "name": "Gemini / gemini-1.5-flash-latest",
         "call": lambda msgs, mt: gemini_client.chat.completions.create(
-            model="gemini-1.5-flash",
+            model="gemini-1.5-flash-latest",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
@@ -86,7 +86,7 @@ def call_llm(messages, max_tokens=2048):
             return provider["call"](messages, max_tokens)
         except Exception as e:
             err = str(e)
-            if "rate_limit" in err or "429" in err or "quota" in err.lower():
+            if "rate_limit" in err or "429" in err or "404" in err or "402" in err or "quota" in err.lower():
                 print(f"  ⚠️  {provider['name']} rate limited, trying next...")
                 last_error = e
                 time.sleep(2)
