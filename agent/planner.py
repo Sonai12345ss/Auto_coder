@@ -1,10 +1,51 @@
 import os
 import json
+import time
 from groq import Groq
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+openrouter_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+)
+
+def call_llm(messages):
+    """Try each provider in order. If rate limited, move to next automatically."""
+    providers = [
+        ("Groq / llama-3.3-70b", lambda: groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages, temperature=0.2, max_tokens=4096
+        )),
+        ("OpenRouter / llama-3.3-70b", lambda: openrouter_client.chat.completions.create(
+            model="meta-llama/llama-3.3-70b-instruct:free",
+            messages=messages, temperature=0.2, max_tokens=4096
+        )),
+        ("OpenRouter / gemma-3-27b", lambda: openrouter_client.chat.completions.create(
+            model="google/gemma-3-27b-it:free",
+            messages=messages, temperature=0.2, max_tokens=4096
+        )),
+        ("OpenRouter / gemma-3-12b", lambda: openrouter_client.chat.completions.create(
+            model="google/gemma-3-12b-it:free",
+            messages=messages, temperature=0.2, max_tokens=4096
+        )),
+    ]
+    last_error = None
+    for name, fn in providers:
+        try:
+            print(f"  🤖 Planner using {name}...")
+            return fn()
+        except Exception as e:
+            err = str(e)
+            if "rate_limit" in err or "429" in err or "404" in err or "402" in err:
+                print(f"  ⚠️  {name} rate limited, trying next...")
+                last_error = e
+                time.sleep(2)
+                continue
+            raise
+    raise Exception(f"All planner providers failed. Last error: {last_error}")
 
 PLANNER_PROMPT = """
 You are a senior software architect. Your job is to take a project description and create a detailed project blueprint in JSON format.
@@ -164,15 +205,10 @@ def generate_blueprint(project_description):
     """Takes a project description and returns a structured JSON blueprint."""
     print("\n🧠 Planner Agent thinking...")
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": PLANNER_PROMPT},
-            {"role": "user", "content": f"Create a complete blueprint for: {project_description}\n\nRemember: every component that App.js imports MUST be in the files list."}
-        ],
-        temperature=0.2,
-        max_tokens=4096
-    )
+    response = call_llm([
+        {"role": "system", "content": PLANNER_PROMPT},
+        {"role": "user", "content": f"Create a complete blueprint for: {project_description}\n\nRemember: every component that App.js imports MUST be in the files list."}
+    ])
 
     raw = response.choices[0].message.content.strip()
 
@@ -207,7 +243,7 @@ def generate_blueprint(project_description):
             component_names = re.findall(r'\b([A-Z][a-zA-Z]+)\b', desc)
             for name in component_names:
                 component_path = f"frontend/src/components/{name}.js"
-                if component_path not in existing_paths and name not in ["React", "Route", "Routes", "BrowserRouter", "Navigate", "Routing", "Link", "NavLink", "App"]:
+                if component_path not in existing_paths and name not in ["React", "Route", "Routes", "BrowserRouter"]:
                     print(f"⚠️  Auto-adding component from App.js description: {component_path}")
                     blueprint["files"].append({
                         "path": component_path,
