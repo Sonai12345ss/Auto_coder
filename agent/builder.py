@@ -41,9 +41,9 @@ PROVIDERS = [
         )
     },
     {
-        "name": "Gemini / gemini-1.5-flash-latest",
+        "name": "Gemini / gemini-2.5-flash",
         "call": lambda msgs, mt: gemini_client.chat.completions.create(
-            model="gemini-1.5-flash-latest",
+            model="gemini-2.5-flash",
             messages=msgs, temperature=0.15, max_tokens=mt
         )
     },
