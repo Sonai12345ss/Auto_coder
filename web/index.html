@@ -4,7 +4,7 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>AutoCoder — Build Full Stack Apps with AI</title>
-  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     :root{
@@ -12,7 +12,7 @@
       --border:#1e2530;--accent:#00e5ff;--accent2:#7b61ff;
       --text:#e8edf5;--muted:#4a5568;--success:#00e676;--error:#ff5252;
       --warn:#ffb300;
-      --font-display:'Syne',sans-serif;---font-mono:'JetBrains Mono',monospace;
+      --font-display:'Syne',sans-serif;--font-mono:'DM Mono',monospace;
     }
     html{scroll-behavior:smooth}
     body{background:var(--bg);color:var(--text);font-family:var(--font-display);min-height:100vh;overflow-x:hidden}
@@ -75,9 +75,7 @@
     .tab-content.active{display:block}
 
     /* CODE VIEWER */
-    .code-viewer{display:grid;grid-template-columns:220px 1fr;height:500px;background:#0d1117;font-family:var(--font-mono)}
-    .file-tree{background:#0d1117;border-right:1px solid #21262d;overflow-y:auto;display:flex;flex-direction:column}
-    .file-tree{background:#0d1117;border-right:1px solid #21262d;overflow-y:auto;display:flex;flex-direction:column}
+    .code-viewer{display:grid;grid-template-columns:220px 1fr;height:420px;border:1px solid var(--border);border-radius:12px;overflow:hidden}
     .file-tree{background:var(--bg);border-right:1px solid var(--border);overflow-y:auto;padding:12px 0}
     .file-tree-header{font-family:var(--font-mono);font-size:10px;color:var(--muted);letter-spacing:2px;padding:8px 16px;text-transform:uppercase}
     .file-item{display:flex;align-items:center;gap:8px;padding:7px 16px;cursor:pointer;transition:background 0.15s;font-family:var(--font-mono);font-size:12px;color:var(--muted);border-left:2px solid transparent}
@@ -92,7 +90,7 @@
     pre{padding:16px;margin:0;font-family:var(--font-mono);font-size:12px;line-height:1.7;color:#abb2bf;white-space:pre;tab-size:2}
 
     /* SYNTAX HIGHLIGHT */
-    .tk{color:#ff7b72}.ts{color:#a5d6ff}.tn{color:#79c0ff}.tc{color:#8b949e;font-style:italic}.ta{color:#79c0ff}.tcl{color:#ffa657}
+    .kw{color:#c678dd}.fn{color:#61afef}.str{color:#98c379}.num{color:#d19a66}
     .cm{color:#5c6370;font-style:italic}.tag{color:#e06c75}.attr{color:#d19a66}
     .pun{color:#abb2bf}.cls{color:#e5c07b}
 
@@ -444,12 +442,7 @@
       let i=0;
       const timer=setInterval(()=>{if(i<steps.length){setProgress(steps[i][0],steps[i][1]);addLog(steps[i][2],'muted');i++;}},2500);
       try{
-        const res = await fetch(API_URL + '/build', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({description: prompt}),
-              signal: AbortSignal.timeout(300000)  // 5 minute timeout
-          });
+        const res=await fetch(`${API_URL}/build`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:prompt})});
         clearInterval(timer);
         if(!res.ok) throw new Error('Build failed');
         const data=await res.json();
@@ -475,12 +468,7 @@
         // Show results
         document.getElementById('resultsSection').classList.add('visible');
         document.getElementById('downloadMeta').textContent=`${data.project_name} · ${data.files_built} files · React + Flask + PostgreSQL`;
-        const zipBytes = atob(data.zip_b64);
-        const zipArray = new Uint8Array(zipBytes.length);
-        for(let i = 0; i < zipBytes.length; i++) zipArray[i] = zipBytes.charCodeAt(i);
-        const blob = new Blob([zipArray], {type: 'application/zip'});
-        document.getElementById('downloadBtn').href = URL.createObjectURL(blob);
-        document.getElementById('downloadBtn').download = `${data.project_name}.zip`;
+        document.getElementById('downloadBtn').href=`${API_URL}${data.download_url}`;
         document.getElementById('downloadSection').classList.add('visible');
       }catch(err){
         clearInterval(timer);
