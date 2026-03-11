@@ -9,39 +9,45 @@ from agent.memory import query_experience, add_experience
 
 load_dotenv()
 
-def _groq(key): return Groq(api_key=os.environ.get(key, ""))
-def _gemini(key): return OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get(key, ""))
-def _openrouter(): return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY", ""))
+# Pre-initialize all clients once at startup (faster than creating per call)
+groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+groq2   = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
+groq3   = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
+gemini1 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY", ""))
+gemini2 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_2", ""))
+gemini3 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_3", ""))
+openrouter = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY", ""))
 
 # 3 Groq + 3x2 Gemini + 3 OpenRouter = 12 providers
 PROVIDERS = [
-    {"name": "Groq-1 / llama-3.3-70b",     "call": lambda msgs, mt: _groq("GROQ_API_KEY").chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-2 / llama-3.3-70b",     "call": lambda msgs, mt: _groq("GROQ_API_KEY_2").chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-3 / llama-3.3-70b",     "call": lambda msgs, mt: _groq("GROQ_API_KEY_3").chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-1 / gemini-2.0-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY").chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.0-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY_2").chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.0-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY_3").chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY").chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY_2").chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY_3").chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "OpenRouter / llama-3.3-70b",  "call": lambda msgs, mt: _openrouter().chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "OpenRouter / gemma-3-27b",    "call": lambda msgs, mt: _openrouter().chat.completions.create(model="google/gemma-3-27b-it:free", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "OpenRouter / gemma-3-12b",    "call": lambda msgs, mt: _openrouter().chat.completions.create(model="google/gemma-3-12b-it:free", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-1 / llama-3.3-70b",     "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-2 / llama-3.3-70b",     "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-3 / llama-3.3-70b",     "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.0-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.0-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.0-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "OpenRouter / llama-3.3-70b",  "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "OpenRouter / gemma-3-27b",    "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "OpenRouter / gemma-3-12b",    "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-12b-it:free", messages=msgs, temperature=0.15, max_tokens=mt)},
 ]
 
-def call_llm(messages, max_tokens=2048):
-    """Try each provider in order. If rate limited, move to next automatically."""
+def call_llm(messages, max_tokens=4096):
+    """Try each provider in order with exponential backoff on rate limits."""
     last_error = None
-    for provider in PROVIDERS:
+    for attempt, provider in enumerate(PROVIDERS):
         try:
             print(f"  🤖 Using {provider['name']}...")
             return provider["call"](messages, max_tokens)
         except Exception as e:
             err = str(e)
             if "rate_limit" in err or "429" in err or "quota" in err.lower() or "503" in err or "404" in err or "402" in err:
-                print(f"  ⚠️  {provider['name']} rate limited, trying next...")
+                wait = min(2 ** (attempt % 4), 16)  # exponential backoff: 1,2,4,8,16s max
+                print(f"  ⚠️  {provider['name']} rate limited, waiting {wait}s then trying next...")
                 last_error = e
-                time.sleep(2)
+                time.sleep(wait)
                 continue
             else:
                 raise
@@ -71,7 +77,7 @@ For backend/models.py:
 - Use Flask-SQLAlchemy with proper column types (String, Integer, Float, Boolean, DateTime, Text)
 - Every model MUST have: id (primary key), created_at (DateTime, default=datetime.utcnow)
 - Every string field MUST have a max length: String(100), String(255), etc.
-- Add db.Index() for any foreign key column for query performance
+- Add db.Index() for any foreign key column — MUST be placed OUTSIDE and AFTER the class definition, never inside it. Example: db.Index('ix_user_id', MyModel.user_id)
 - Add __repr__ for every model
 - to_dict() method must include ALL fields, converting datetime with .isoformat()
 - Hash passwords using werkzeug.security.generate_password_hash — NEVER store plain text passwords
@@ -214,25 +220,15 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
             print(f"  🔄 Retry attempt {attempt}...")
 
         try:
-            response = call_llm(history, max_tokens=2048)
+            response = call_llm(history, max_tokens=4096)
         except Exception as e:
             print(f"  ❌ All providers failed: {str(e)[:120]}")
             return final_code
 
         code = response.choices[0].message.content.strip()
 
-        # Clean up backticks if model adds them
-        if "```" in code:
-            lines = code.split('\n')
-            clean_lines = []
-            inside_block = False
-            for line in lines:
-                if line.startswith("```"):
-                    inside_block = not inside_block
-                    continue
-                if inside_block or not line.startswith("```"):
-                    clean_lines.append(line)
-            code = '\n'.join(clean_lines).strip()
+        # Clean up backticks safely - replace known patterns directly
+        code = code.replace("```python", "").replace("```javascript", "").replace("```jsx", "").replace("```css", "").replace("```json", "").replace("```html", "").replace("```", "").strip()
 
         # Write file to project
         full_path = os.path.join(project_path, file_path)
