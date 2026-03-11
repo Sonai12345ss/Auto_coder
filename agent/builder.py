@@ -9,72 +9,24 @@ from agent.memory import query_experience, add_experience
 
 load_dotenv()
 
-# Primary: Groq (fast, free, 100k tokens/day)
-groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+def _groq(key): return Groq(api_key=os.environ.get(key, ""))
+def _gemini(key): return OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get(key, ""))
+def _openrouter(): return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY", ""))
 
-# Fallback 1: Gemini (1M tokens/min, virtually unlimited)
-gemini_client = OpenAI(
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-    api_key=os.environ.get("GEMINI_API_KEY", ""),
-)
-
-# Fallback 2: OpenRouter (free models, separate rate limits)
-openrouter_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
-)
-
-# Provider chain — tries each in order when previous hits rate limit
+# 3 Groq + 3x2 Gemini + 3 OpenRouter = 12 providers
 PROVIDERS = [
-    {
-        "name": "Groq / llama-3.3-70b",
-        "call": lambda msgs, mt: groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=msgs, temperature=0.15, max_tokens=mt
-        )
-    },
-    {
-        "name": "Gemini / gemini-2.0-flash",
-        "call": lambda msgs, mt: gemini_client.chat.completions.create(
-            model="gemini-2.0-flash",
-            messages=msgs, temperature=0.15, max_tokens=mt
-        )
-    },
-    {
-        "name": "Gemini / gemini-2.5-flash",
-        "call": lambda msgs, mt: gemini_client.chat.completions.create(
-            model="gemini-2.5-flash",
-            messages=msgs, temperature=0.15, max_tokens=mt
-        )
-    },
-    {
-        "name": "Gemini / gemini-2.0-flash-lite",
-        "call": lambda msgs, mt: gemini_client.chat.completions.create(
-            model="gemini-2.0-flash-lite",
-            messages=msgs, temperature=0.15, max_tokens=mt
-        )
-    },
-    {
-        "name": "OpenRouter / llama-3.3-70b",
-        "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="meta-llama/llama-3.3-70b-instruct:free",
-            messages=msgs, temperature=0.15, max_tokens=mt
-        )
-    },
-    {
-        "name": "OpenRouter / gemma-3-27b",
-        "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="google/gemma-3-27b-it:free",
-            messages=msgs, temperature=0.15, max_tokens=mt
-        )
-    },
-    {
-        "name": "OpenRouter / gemma-3-12b",
-        "call": lambda msgs, mt: openrouter_client.chat.completions.create(
-            model="google/gemma-3-12b-it:free",
-            messages=msgs, temperature=0.15, max_tokens=mt
-        )
-    },
+    {"name": "Groq-1 / llama-3.3-70b",     "call": lambda msgs, mt: _groq("GROQ_API_KEY").chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-2 / llama-3.3-70b",     "call": lambda msgs, mt: _groq("GROQ_API_KEY_2").chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-3 / llama-3.3-70b",     "call": lambda msgs, mt: _groq("GROQ_API_KEY_3").chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.0-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY").chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.0-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY_2").chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.0-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY_3").chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY").chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY_2").chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: _gemini("GEMINI_API_KEY_3").chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "OpenRouter / llama-3.3-70b",  "call": lambda msgs, mt: _openrouter().chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "OpenRouter / gemma-3-27b",    "call": lambda msgs, mt: _openrouter().chat.completions.create(model="google/gemma-3-27b-it:free", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "OpenRouter / gemma-3-12b",    "call": lambda msgs, mt: _openrouter().chat.completions.create(model="google/gemma-3-12b-it:free", messages=msgs, temperature=0.15, max_tokens=mt)},
 ]
 
 def call_llm(messages, max_tokens=2048):
@@ -86,7 +38,7 @@ def call_llm(messages, max_tokens=2048):
             return provider["call"](messages, max_tokens)
         except Exception as e:
             err = str(e)
-            if "rate_limit" in err or "429" in err or "404" in err or "402" in err or "quota" in err.lower():
+            if "rate_limit" in err or "429" in err or "quota" in err.lower() or "503" in err or "404" in err or "402" in err:
                 print(f"  ⚠️  {provider['name']} rate limited, trying next...")
                 last_error = e
                 time.sleep(2)
