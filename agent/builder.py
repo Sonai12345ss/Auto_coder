@@ -321,6 +321,36 @@ def build_project(blueprint, output_dir="sandbox/projects"):
             failed_files.append(file_info["path"])
         time.sleep(3)  # pause between files to avoid rate limits
 
+    # ─────────────────────────────────────────────
+    # PHASE 2: TEST + DEBUG LOOP
+    # ─────────────────────────────────────────────
+    print(f"\n{'='*50}")
+    print("🧪 RUNNING TESTER + DEBUGGER...")
+    print(f"{'='*50}")
+
+    try:
+        from agent.tester import run_tests, format_errors_for_log
+        from agent.debugger import run_debug_loop
+
+        # Run full test → debug → retest loop (max 3 attempts)
+        existing_files, final_test_result, attempts = run_debug_loop(
+            files=existing_files,
+            tester_fn=run_tests,
+            max_retries=3
+        )
+
+        # Write back any fixed files to disk
+        for file_path, code in existing_files.items():
+            full_path = os.path.join(project_path, file_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w") as f:
+                f.write(code)
+
+        print(f"\n🔬 Test result after {attempts} debug attempt(s): {final_test_result['summary']}")
+
+    except Exception as e:
+        print(f"\n⚠️  Tester/Debugger failed: {e} — continuing with unvalidated build")
+
     # Write requirements.txt
     requirements = """flask
 flask-cors
