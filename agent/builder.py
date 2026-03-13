@@ -126,21 +126,57 @@ For frontend/src/api.js:
 - Export individual async functions for EVERY API endpoint in the blueprint
 - Each function uses try/catch and re-throws errors for the caller to handle
 
-For frontend/src/components/ files:
+For frontend/public/index.html:
+- Standard React HTML template with <div id="root"></div>
+- Include proper meta charset, viewport tags
+- Title should match the project name
+- Include Tailwind CSS CDN: <script src="https://cdn.tailwindcss.com"></script>
+- Include Google Fonts: Inter font family
+
+For frontend/src/index.js:
+- MUST use React 18 createRoot API: const root = ReactDOM.createRoot(document.getElementById('root')); root.render(<React.StrictMode><App /></React.StrictMode>)
+- NEVER wrap App in BrowserRouter here — App.js already has BrowserRouter
+- NEVER use ReactDOM.render() — it is deprecated in React 18
+
+For frontend/src/App.js:
+- MUST contain real routing using React Router v6 (BrowserRouter, Routes, Route)
+- Include routes for every major page inferred from the blueprint
+- Include a Navbar component with navigation links
+- Handle auth state: check localStorage for JWT token, show login/logout accordingly
+- Every page component must be imported and rendered — no empty shells
+- NEVER add a second BrowserRouter — only one at the top level
+
+For frontend/src/components/ files — UI QUALITY RULES (TAILWIND):
+- ALL styling MUST use Tailwind CSS utility classes. Never write inline styles or import CSS files.
+- NEVER import individual CSS files per component (no './Home.css' etc.)
+- Design every page like a real production SaaS app — clean, modern, professional
+- Use a consistent color palette: primary=indigo-600, success=green-500, danger=red-500, background=gray-50
+- Navbar: dark background (bg-gray-900), logo left, nav links right, user menu with dropdown
+- Login/Register: centered card (max-w-md mx-auto mt-20), shadow-lg, rounded-xl, branded header
+- Forms: label above input, input with border border-gray-300 rounded-lg px-4 py-2 w-full focus:ring-2 focus:ring-indigo-500
+- Buttons: primary = bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-6 rounded-lg
+- Cards: bg-white rounded-xl shadow-md p-6 hover:shadow-lg transition
+- Tables: bg-white rounded-xl shadow overflow-hidden, thead bg-gray-50, alternating row colors
+- Loading: animated spinner using Tailwind animate-spin with a border-indigo-600 border-t-transparent circle
+- Error: red banner: bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg
+- Success: green banner: bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg
+- Empty state: centered icon + message in gray text, bg-white rounded-xl shadow p-12 text-center
+- Grid layouts for lists: grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6
+- Every page must have a proper page header with title and subtitle in gray
+
+For frontend/src/components/ files — HOOKS & BUG-FREE RULES:
 - Every component must use React hooks: useState for local state, useEffect for data fetching
-- Every component that fetches data must show: loading spinner while loading, error message on failure, empty state when no data
+- CRITICAL: Every useEffect MUST have a dependency array []. NEVER write useEffect(() => {}) without []
+- Correct: useEffect(() => { fetchData() }, []) — runs once on mount only
+- CRITICAL: Navbar MUST check localStorage.getItem('token') before calling getUser(). If no token, skip API call entirely.
+- CRITICAL: All error handling must check if error.response exists before accessing error.response.status
+  Safe pattern: const msg = error.response?.data?.message || error.message || 'Something went wrong'
 - Forms must have controlled inputs with onChange handlers and onSubmit with preventDefault()
-- Forms must show validation errors inline before submitting
 - After successful POST/PUT/DELETE, refresh the data list automatically
-- Use async/await for all API calls, wrapped in try/catch with proper error state
-- CRITICAL: NEVER import sub-components that are not explicitly listed in the blueprint files
-- NEVER import LoadingSpinner, Pagination, ErrorAlert, Post, Card or any helper component not in the file list
-- Write loading/error/empty/pagination logic INLINE using simple JSX and state
-- Loading inline: {loading && <div className="loading-spinner"></div>}
-- Error inline: {error && <div className="error-message">{error}</div>}
-- Empty inline: {items.length === 0 && <p>No items found.</p>}
-- Pagination inline: prev/next buttons using page state
-- ONLY import from: react, react-router-dom, ../api, ./CommentList, ./CommentForm (only if those files exist in blueprint)
+- NEVER import LoadingSpinner, Pagination, ErrorAlert or any helper component not in the blueprint file list
+- Write loading/error/empty/pagination logic INLINE
+- Loading inline: {loading && <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-10 w-10 border-4 border-indigo-600 border-t-transparent"></div></div>}
+- ONLY import from: react, react-router-dom, ../api
 
 For frontend/package.json:
 - Include: react, react-dom, react-scripts, axios, react-router-dom as dependencies
@@ -148,11 +184,8 @@ For frontend/package.json:
 - Set proxy: "http://localhost:5000" for development
 
 For frontend/src/index.css:
-- Write a complete, modern CSS stylesheet
-- Use CSS variables for colors, font sizes, spacing
-- Style: body, buttons (primary/secondary/danger), forms, inputs, tables, cards, navbar, loading spinner, error messages
-- Make it responsive with at least one @media (max-width: 768px) breakpoint
-- Use a clean color scheme — not just black and white
+- Minimal CSS — just body font-family: 'Inter', sans-serif and box-sizing: border-box
+- All real styling is done via Tailwind classes in components
 
 ═══════════════════════════════════════════
 GENERAL FILES
