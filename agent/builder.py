@@ -142,9 +142,23 @@ For frontend/src/App.js:
 - MUST contain real routing using React Router v6 (BrowserRouter, Routes, Route)
 - Include routes for every major page inferred from the blueprint
 - Include a Navbar component with navigation links
-- Handle auth state: check localStorage for JWT token, show login/logout accordingly
-- Every page component must be imported and rendered — no empty shells
 - NEVER add a second BrowserRouter — only one at the top level
+- Handle auth with localStorage directly — NO onLogin props passed to children
+- Auth pattern: App.js reads localStorage.getItem('token') for its own state only
+- Login/Register components handle their own redirect using useNavigate() after success:
+  Example in Login.js: const navigate = useNavigate(); ... await login(data); localStorage.setItem('token', response.token); navigate('/');
+- NEVER pass onLogin, onLogout, or setUser as props to Login or Register — they manage themselves
+
+For frontend/src/api.js:
+- Use axios with baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000'
+- Add axios request interceptor to inject Authorization: Bearer <token> from localStorage
+- Add axios response interceptor: on 401, clear localStorage and redirect to /login
+- Export individual async functions for EVERY API endpoint in the blueprint
+- Each function uses try/catch and re-throws errors for the caller to handle
+- NEVER export the axios instance as default — only export named functions
+- NEVER import the axios instance directly in components — always import named functions
+  Correct: import { getProducts, login } from '../api'
+  Wrong: import axios from '../api' or import api from '../api'
 
 For frontend/src/components/ files — UI QUALITY RULES (TAILWIND):
 - ALL styling MUST use Tailwind CSS utility classes. Never write inline styles or import CSS files.
