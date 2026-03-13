@@ -42,8 +42,8 @@ def call_llm(messages, max_tokens=4096):
             print(f"  🤖 Debugger using {provider['name']}...")
             return provider["call"](messages, max_tokens)
         except Exception as e:
-            err = str(e)
-            if any(x in err for x in ["rate_limit", "429", "quota", "503", "404", "402"]):
+            err = str(e).lower()
+            if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota", "503", "404", "402", "temporarily", "overloaded", "upstream"]):
                 wait = min(2 ** (attempt % 4), 16)
                 print(f"  ⚠️  {provider['name']} rate limited, waiting {wait}s...")
                 last_error = e
