@@ -17,7 +17,12 @@ gemini1 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/open
 gemini2 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_2", ""))
 gemini3 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_3", ""))
 openrouter = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY", ""))
+doubleword = OpenAI(
+    base_url="https://api.doubleword.ai/v1",  # replace with real URL
+    api_key=os.environ.get("DOUBLEWORD_API_KEY", "")
+)
 
+# Add to PROVIDERS list AFTER OpenRouter (as last resort paid fallback)
 # 3 Groq + 3x2 Gemini + 3 OpenRouter = 12 providers
 PROVIDERS = [
     {"name": "Groq-1 / llama-3.3-70b",     "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.15, max_tokens=mt)},
@@ -32,6 +37,9 @@ PROVIDERS = [
     {"name": "OpenRouter / llama-3.3-70b",  "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "OpenRouter / gemma-3-27b",    "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free", messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "OpenRouter / gemma-3-12b",    "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-12b-it:free", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Doubleword / Qwen3.5-397B", "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Doubleword / Qwen3.5-35B",  "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-35B-A3B-FP8",  messages=msgs, temperature=0.15, max_tokens=mt)},
+
 ]
 
 def call_llm(messages, max_tokens=4096):
@@ -137,6 +145,8 @@ For frontend/src/index.js:
 - MUST use React 18 createRoot API: const root = ReactDOM.createRoot(document.getElementById('root')); root.render(<React.StrictMode><App /></React.StrictMode>)
 - NEVER wrap App in BrowserRouter here — App.js already has BrowserRouter
 - NEVER use ReactDOM.render() — it is deprecated in React 18
+- NEVER add empty imports like import {} from 'react-router-dom' — only import what is actually used
+- Only import: react, react-dom/client, ./index.css, ./App
 
 For frontend/src/App.js:
 - MUST contain real routing using React Router v6 (BrowserRouter, Routes, Route)
