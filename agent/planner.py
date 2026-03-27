@@ -6,48 +6,49 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
-
-# Pre-initialize all clients once at startup
-groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
-groq2   = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
-groq3   = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
-gemini1 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY", ""))
-gemini2 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_2", ""))
-gemini3 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_3", ""))
-openrouter = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY", ""))
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+openrouter_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+)
+gemini_client = OpenAI(
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    api_key=os.environ.get("GEMINI_API_KEY", ""),
+)
 
 def call_llm(messages):
-    """Try each provider in order with exponential backoff on rate limits."""
+    """Try each provider in order. If rate limited, move to next automatically."""
     providers = [
-        ("Groq-1 / llama-3.3-70b",      lambda: groq1.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Groq-2 / llama-3.3-70b",      lambda: groq2.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Groq-3 / llama-3.3-70b",      lambda: groq3.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-1 / gemini-2.0-flash",  lambda: gemini1.chat.completions.create(model="gemini-2.0-flash", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-2 / gemini-2.0-flash",  lambda: gemini2.chat.completions.create(model="gemini-2.0-flash", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-3 / gemini-2.0-flash",  lambda: gemini3.chat.completions.create(model="gemini-2.0-flash", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-1 / gemini-2.5-flash",  lambda: gemini1.chat.completions.create(model="gemini-2.5-flash", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-2 / gemini-2.5-flash",  lambda: gemini2.chat.completions.create(model="gemini-2.5-flash", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-3 / gemini-2.5-flash",  lambda: gemini3.chat.completions.create(model="gemini-2.5-flash", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("OpenRouter / llama-3.3-70b",   lambda: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("OpenRouter / gemma-3-27b",     lambda: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("OpenRouter / gemma-3-12b",     lambda: openrouter.chat.completions.create(model="google/gemma-3-12b-it:free", messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Groq / llama-3.3-70b", lambda: groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages, temperature=0.2, max_tokens=4096
+        )),
+        ("Gemini / gemini-2.0-flash", lambda: gemini_client.chat.completions.create(
+            model="gemini-2.0-flash",
+            messages=messages, temperature=0.2, max_tokens=4096
+        )),
+        ("OpenRouter / llama-3.3-70b", lambda: openrouter_client.chat.completions.create(
+            model="meta-llama/llama-3.3-70b-instruct:free",
+            messages=messages, temperature=0.2, max_tokens=4096
+        )),
+        ("OpenRouter / gemma-3-27b", lambda: openrouter_client.chat.completions.create(
+            model="google/gemma-3-27b-it:free",
+            messages=messages, temperature=0.2, max_tokens=4096
+        )),
     ]
     last_error = None
-    for attempt, (name, fn) in enumerate(providers):
+    for name, fn in providers:
         try:
             print(f"  🤖 Planner using {name}...")
             return fn()
         except Exception as e:
-            err = str(e).lower()
-            if any(x in err for x in ["rate_limit", "rate-limit", "429", "404", "402", "503", "quota", "temporarily", "overloaded", "upstream"]):
-                wait = min(2 ** (attempt % 4), 16)
-                print(f"  ⚠️  {name} rate limited, waiting {wait}s then trying next...")
+            err = str(e)
+            if "rate_limit" in err or "429" in err or "404" in err or "402" in err:
+                print(f"  ⚠️  {name} rate limited, trying next...")
                 last_error = e
-                time.sleep(wait)
+                time.sleep(2)
                 continue
-            last_error = e
-            print(f"  ⚠️  {name} failed with: {str(e)[:80]}, trying next...")
-            continue
+            raise
     raise Exception(f"All planner providers failed. Last error: {last_error}")
 
 PLANNER_PROMPT = """
@@ -192,11 +193,10 @@ REQUIRED_FILES = [
     "backend/routes.py",
     "backend/app.py",
     "frontend/package.json",
-    "frontend/public/index.html",
     "frontend/src/App.js",
-    "frontend/src/index.js",
     "frontend/src/index.css",
     "frontend/src/api.js",
+    "frontend/src/index.js",
     "frontend/src/components/Navbar.js",
     "frontend/src/components/Login.js",
     "frontend/src/components/Register.js",
@@ -242,24 +242,18 @@ def generate_blueprint(project_description):
         if app_js_entry:
             existing_paths = [f["path"] for f in blueprint["files"]]
             desc = app_js_entry.get("description", "")
+            # Find component names mentioned in the description
             import re
             component_names = re.findall(r'\b([A-Z][a-zA-Z]+)\b', desc)
-            EXCLUDED = {"React", "Route", "Routes", "BrowserRouter", "Navigate", "Routing",
-                        "Link", "NavLink", "App", "Switch", "Router", "Component", "Fragment",
-                        "Provider", "Context", "Suspense", "Redirect", "Switch"}
             for name in component_names:
                 component_path = f"frontend/src/components/{name}.js"
-                if component_path not in existing_paths and name not in EXCLUDED:
+                if component_path not in existing_paths and name not in ["React", "Route", "Routes", "BrowserRouter"]:
                     print(f"⚠️  Auto-adding component from App.js description: {component_path}")
                     blueprint["files"].append({
                         "path": component_path,
                         "description": f"{name} component used in App.js routing",
                         "depends_on": ["frontend/src/api.js"]
                     })
-
-        # Remove ghost Routing.js — never a real component, it's a React Router concept
-        blueprint["files"] = [f for f in blueprint["files"]
-                               if f["path"] != "frontend/src/components/Routing.js"]
 
         # Sort files by dependency order
         blueprint["files"] = sorted(
