@@ -311,7 +311,7 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
     return final_code
 
 
-def build_project(blueprint, output_dir="sandbox/projects"):
+def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, on_file_done=None):
     """Builds an entire project from a blueprint."""
 
     project_name = blueprint["project_name"]
@@ -329,6 +329,8 @@ def build_project(blueprint, output_dir="sandbox/projects"):
     ordered_files = sorted(files, key=lambda f: len(f.get("depends_on", [])))
 
     for file_info in ordered_files:
+        if on_file_start:
+            on_file_start(file_info["path"])
         code = build_file(
             file_info=file_info,
             blueprint=blueprint,
@@ -337,9 +339,13 @@ def build_project(blueprint, output_dir="sandbox/projects"):
         )
         if code:
             existing_files[file_info["path"]] = code
+            if on_file_done:
+                on_file_done(file_info["path"], success=True)
         else:
             failed_files.append(file_info["path"])
-        time.sleep(3)  # pause between files to avoid rate limits
+            if on_file_done:
+                on_file_done(file_info["path"], success=False)
+        time.sleep(3)
 
     # ─────────────────────────────────────────────
     # PHASE 2: TEST + DEBUG LOOP
