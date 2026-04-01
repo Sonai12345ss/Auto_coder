@@ -166,7 +166,27 @@ For frontend/src/api.js:
   Correct: import { getProducts, login } from '../api'
   Wrong: import axios from '../api' or import api from '../api'
 
-For frontend/src/components/ files — UI QUALITY RULES (TAILWIND):
+For frontend/src/components/PrivateRoute.js:
+- A route guard component that checks localStorage for a JWT token
+- If token exists: render the child component (use React Router v6 Outlet pattern)
+- If no token: redirect to /login using Navigate from react-router-dom
+- Exact implementation:
+  import React from 'react';
+  import { Navigate, Outlet } from 'react-router-dom';
+  const PrivateRoute = () => {
+    const token = localStorage.getItem('token');
+    return token ? <Outlet /> : <Navigate to="/login" replace />;
+  };
+  export default PrivateRoute;
+- App.js must wrap all protected routes with PrivateRoute:
+  <Route element={<PrivateRoute />}>
+    <Route path="/dashboard" element={<Dashboard />} />
+    <Route path="/orders" element={<OrderList />} />
+    <Route path="/cart" element={<Cart />} />
+  </Route>
+- Public routes (login, register, home) must NOT be inside PrivateRoute
+
+
 - ALL styling MUST use Tailwind CSS utility classes. Never write inline styles or import CSS files.
 - NEVER import individual CSS files per component (no './Home.css' etc.)
 - Design every page like a real production SaaS app — clean, modern, professional
