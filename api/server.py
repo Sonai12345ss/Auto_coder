@@ -15,6 +15,7 @@ from pydantic import BaseModel
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agent.planner import generate_blueprint
 from agent.builder import build_project
+from agent.packager import run_packager
 
 app = FastAPI(title="Auto Coder API")
 
@@ -159,7 +160,13 @@ async def _run_build(build_id: str, description: str):
 
         # ── STAGE 4: Packaging ──
         status["stage"] = "packaging"
-        status["message"] = "📦 Packaging your project..."
+        status["message"] = "🐳 Generating Docker + deploy config..."
+
+        # Run packager — adds Dockerfile, docker-compose.yml, Makefile, DEPLOY.md
+        existing_files = await loop.run_in_executor(
+            None,
+            lambda: run_packager(project_path, blueprint, existing_files)
+        )
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
