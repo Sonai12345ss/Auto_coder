@@ -1,6 +1,7 @@
 import os
 import time
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from groq import Groq
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -332,7 +333,7 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
 
 
 def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, on_file_done=None):
-    """Builds an entire project from a blueprint."""
+    """Builds an entire project from a blueprint — parallel where possible."""
 
     project_name = blueprint["project_name"]
     project_path = os.path.join(output_dir, project_name)
@@ -343,29 +344,111 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
 
     existing_files = {}
     failed_files = []
-
-    # Sort files by dependency order
     files = blueprint["files"]
-    ordered_files = sorted(files, key=lambda f: len(f.get("depends_on", [])))
 
-    for file_info in ordered_files:
-        if on_file_start:
-            on_file_start(file_info["path"])
-        code = build_file(
-            file_info=file_info,
-            blueprint=blueprint,
-            project_path=project_path,
-            existing_files=existing_files
-        )
-        if code:
-            existing_files[file_info["path"]] = code
-            if on_file_done:
-                on_file_done(file_info["path"], success=True)
+    # ─────────────────────────────────────────────
+    # Split files into dependency waves:
+    # Wave 0: no dependencies (build in parallel)
+    # Wave 1: depends on wave 0 (build in parallel after wave 0)
+    # Wave 2: depends on wave 1, etc.
+    # ─────────────────────────────────────────────
+    def get_waves(files):
+        """Group files into waves based on dependencies."""
+        completed = set()
+        waves = []
+        remaining = list(files)
+
+        while remaining:
+            wave = []
+            still_remaining = []
+            for f in remaining:
+                deps = f.get("depends_on", [])
+                if all(d in completed for d in deps):
+                    wave.append(f)
+                else:
+                    still_remaining.append(f)
+            if not wave:
+                # Circular deps or unresolvable — just add all remaining
+                wave = still_remaining
+                still_remaining = []
+            for f in wave:
+                completed.add(f["path"])
+            waves.append(wave)
+            remaining = still_remaining
+        return waves
+
+    waves = get_waves(files)
+    print(f"⚡ Building in {len(waves)} wave(s) — parallel within each wave")
+
+    for wave_idx, wave in enumerate(waves):
+        print(f"\n🌊 Wave {wave_idx + 1}/{len(waves)}: {len(wave)} file(s)")
+
+        if len(wave) == 1:
+            # Single file — build directly, no threading overhead
+            file_info = wave[0]
+            if on_file_start:
+                on_file_start(file_info["path"])
+            code = build_file(
+                file_info=file_info,
+                blueprint=blueprint,
+                project_path=project_path,
+                existing_files=existing_files
+            )
+            if code:
+                existing_files[file_info["path"]] = code
+                if on_file_done:
+                    on_file_done(file_info["path"], success=True)
+            else:
+                failed_files.append(file_info["path"])
+                if on_file_done:
+                    on_file_done(file_info["path"], success=False)
         else:
-            failed_files.append(file_info["path"])
-            if on_file_done:
-                on_file_done(file_info["path"], success=False)
-        time.sleep(3)
+            # Multiple files — build in parallel with ThreadPoolExecutor
+            # Use max 4 workers to avoid hammering the LLM API
+            max_workers = min(4, len(wave))
+            wave_results = {}
+
+            # Notify all files as "building" before starting threads
+            for file_info in wave:
+                if on_file_start:
+                    on_file_start(file_info["path"])
+
+            def build_one(file_info):
+                """Build a single file — runs in thread."""
+                code = build_file(
+                    file_info=file_info,
+                    blueprint=blueprint,
+                    project_path=project_path,
+                    existing_files=dict(existing_files)  # snapshot for thread safety
+                )
+                return file_info["path"], code
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(build_one, f): f for f in wave}
+                for future in as_completed(futures):
+                    try:
+                        file_path, code = future.result()
+                        if code:
+                            wave_results[file_path] = code
+                            if on_file_done:
+                                on_file_done(file_path, success=True)
+                        else:
+                            failed_files.append(file_path)
+                            if on_file_done:
+                                on_file_done(file_path, success=False)
+                    except Exception as e:
+                        file_path = futures[future]["path"]
+                        print(f"  ❌ Thread error for {file_path}: {e}")
+                        failed_files.append(file_path)
+                        if on_file_done:
+                            on_file_done(file_path, success=False)
+
+            # Merge wave results into existing_files
+            existing_files.update(wave_results)
+
+        # Small pause between waves (not between files) to be nice to APIs
+        if wave_idx < len(waves) - 1:
+            time.sleep(2)
 
     # ─────────────────────────────────────────────
     # PHASE 2: TEST + DEBUG LOOP
