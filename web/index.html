@@ -461,7 +461,7 @@
     }
 
     async function pollStatus(buildId, btn){
-      const maxWait = 600000; // 10 minutes
+      const maxWait = 900000; // 15 minutes
       const interval = 2000;  // poll every 2s
       const start = Date.now();
       let lastStage = '';
@@ -470,7 +470,7 @@
         const poll = setInterval(async () => {
           if(Date.now() - start > maxWait){
             clearInterval(poll);
-            reject(new Error('Build timed out after 10 minutes'));
+            reject(new Error('Build timed out after 15 minutes'));
             return;
           }
 

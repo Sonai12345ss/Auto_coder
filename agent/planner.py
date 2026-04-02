@@ -80,11 +80,13 @@ FRONTEND COMPONENT FILES (generate based on the project — include ALL of these
 - frontend/src/components/Navbar.js — navigation bar with auth state (login/logout links)
 - frontend/src/components/Login.js — login form with controlled inputs, error handling
 - frontend/src/components/Register.js — register form with validation
-- For each main resource in the project, generate:
-  - frontend/src/components/[Resource]List.js — list view with loading/error/empty states
-  - frontend/src/components/[Resource]Form.js — create/edit form with validation
-  - frontend/src/components/[Resource]Detail.js — detail/single view (if needed)
 - frontend/src/components/Home.js — landing/home page component
+- For each main resource in the project, generate MAXIMUM 2 components:
+  - frontend/src/components/[Resource]List.js — list view WITH inline create form (combines List + Form in one file)
+  - frontend/src/components/[Resource]Detail.js — detail/single view (only if truly needed)
+- STRICT LIMIT: Maximum 12 total files in the files array. If you need more, combine related components.
+- NEVER generate separate [Resource]Form.js — put the form inside [Resource]List.js instead
+- For a blog: PostList.js handles list + create post. CommentList.js handles comments inline inside PostDetail.js
 
 CRITICAL RULES FOR FILES:
 - App.js must ONLY import components that exist in the files list
@@ -96,6 +98,7 @@ CRITICAL RULES FOR FILES:
 - NEVER generate Router.js, Routes.js, or any wrapper routing component
 - ALWAYS include frontend/src/components/PrivateRoute.js — a route guard that redirects to /login if no JWT token in localStorage
 - ALWAYS include frontend/public/index.html — the React HTML template with Tailwind CDN
+- TOTAL FILE COUNT must be 12 or fewer — combine components to stay within this limit
 
 OUTPUT FORMAT — output exactly this JSON structure:
 {
@@ -266,6 +269,16 @@ def generate_blueprint(project_description):
                         "description": f"{name} component used in App.js routing",
                         "depends_on": ["frontend/src/api.js"]
                     })
+
+        # Hard cap: never more than 16 files total (keeps builds under 8 mins)
+        if len(blueprint["files"]) > 16:
+            print(f"⚠️  Blueprint has {len(blueprint['files'])} files — capping at 16")
+            # Keep all required files + first N component files
+            required = [f for f in blueprint["files"] if f["path"] in REQUIRED_FILES or
+                       not f["path"].startswith("frontend/src/components/")]
+            components = [f for f in blueprint["files"] if f["path"].startswith("frontend/src/components/")
+                         and f["path"] not in REQUIRED_FILES]
+            blueprint["files"] = required + components[:16 - len(required)]
 
         # Remove ghost routing files — React Router concepts, not real components
         GHOST_FILES = {
