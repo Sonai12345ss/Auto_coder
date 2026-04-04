@@ -476,7 +476,16 @@
 
           try{
             const res = await fetch(`${API_URL}/status/${buildId}`);
-            if(!res.ok){ return; } // skip failed polls, keep trying
+            if(!res.ok){
+              // 404 means server restarted mid-build — keep polling, it may come back
+              if(res.status === 404){
+                if(!loggedFiles.has('restart_warn')){
+                  loggedFiles.add('restart_warn');
+                  addLog('⚠️ Server restarted — waiting for it to come back...', 'muted');
+                }
+              }
+              return; // skip this poll, keep trying
+            }
             const s = await res.json();
 
             // Update progress bar based on stage
@@ -525,6 +534,24 @@
               clearInterval(poll);
               reject(new Error(s.error || 'Build failed'));
               return;
+            }
+
+            // Detect server restart — status exists on disk but build stage
+            // is still "building" yet no progress for 60+ seconds
+            if(s.stage === 'building' && Date.now() - start > 60000){
+              const lastBuilt = s.built_count + s.failed_count;
+              if(!window._lastBuiltCount) window._lastBuiltCount = lastBuilt;
+              if(lastBuilt === window._lastBuiltCount){
+                window._staleSince = window._staleSince || Date.now();
+                if(Date.now() - window._staleSince > 90000){
+                  clearInterval(poll);
+                  reject(new Error('Server restarted mid-build. Please try again.'));
+                  return;
+                }
+              } else {
+                window._lastBuiltCount = lastBuilt;
+                window._staleSince = null;
+              }
             }
 
           } catch(e){

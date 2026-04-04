@@ -34,21 +34,35 @@ project_store = {}
 
 # ─────────────────────────────────────────────
 # BUILD STATUS STORE
-# Tracks live progress for each build
+# Persisted to disk so it survives server restarts
 # ─────────────────────────────────────────────
 build_status_store = {}
-# Schema per build_id:
-# {
-#   "stage": "planning" | "building" | "testing" | "done" | "error",
-#   "message": "human readable status",
-#   "files": [{"path": "...", "status": "building"|"done"|"failed"}],
-#   "total_files": N,
-#   "built_count": N,
-#   "failed_count": N,
-#   "started_at": "ISO timestamp",
-#   "project_name": "...",
-#   "result": {...} | None   # set when done
-# }
+STATUS_DIR = "sandbox/build_status"
+os.makedirs(STATUS_DIR, exist_ok=True)
+
+def _status_path(build_id):
+    return os.path.join(STATUS_DIR, f"{build_id}.json")
+
+def save_status(build_id, status):
+    """Save status to disk."""
+    try:
+        with open(_status_path(build_id), "w") as f:
+            import json
+            json.dump(status, f)
+    except Exception:
+        pass
+
+def load_status(build_id):
+    """Load status from disk."""
+    try:
+        path = _status_path(build_id)
+        if os.path.exists(path):
+            with open(path) as f:
+                import json
+                return json.load(f)
+    except Exception:
+        pass
+    return None
 
 def new_build_status(description):
     return {
@@ -76,9 +90,14 @@ def health():
 @app.get("/status/{build_id}")
 async def get_status(build_id: str):
     """Poll this endpoint to get live build progress."""
-    if build_id not in build_status_store:
-        raise HTTPException(status_code=404, detail="Build not found")
-    return build_status_store[build_id]
+    # Check memory first
+    if build_id in build_status_store:
+        return build_status_store[build_id]
+    # Fall back to disk (survives server restart)
+    status = load_status(build_id)
+    if status:
+        return status
+    raise HTTPException(status_code=404, detail="Build not found")
 
 @app.post("/build")
 async def build(request: ProjectRequest):
@@ -90,7 +109,9 @@ async def build(request: ProjectRequest):
         raise HTTPException(status_code=400, detail="Description too short")
 
     build_id = str(uuid.uuid4())[:8]
-    build_status_store[build_id] = new_build_status(request.description)
+    initial_status = new_build_status(request.description)
+    build_status_store[build_id] = initial_status
+    save_status(build_id, initial_status)
 
     print(f"\n🔨 New build [{build_id}]: {request.description}")
 
@@ -108,6 +129,7 @@ async def _run_build(build_id: str, description: str):
         # ── STAGE 1: Planning ──
         status["stage"] = "planning"
         status["message"] = "🧠 Planning your project architecture..."
+        save_status(build_id, status)
 
         loop = asyncio.get_event_loop()
         blueprint = await loop.run_in_executor(None, generate_blueprint, description)
@@ -116,6 +138,7 @@ async def _run_build(build_id: str, description: str):
             status["stage"] = "error"
             status["error"] = "Failed to generate project blueprint"
             status["message"] = "❌ Planning failed"
+            save_status(build_id, status)
             return
 
         project_name = blueprint["project_name"]
@@ -124,6 +147,7 @@ async def _run_build(build_id: str, description: str):
         status["total_files"] = total
         status["message"] = f"📋 Plan ready — building {total} files..."
         status["stage"] = "building"
+        save_status(build_id, status)
 
         # Pre-populate file list so frontend can show them immediately
         status["files"] = [
@@ -137,6 +161,7 @@ async def _run_build(build_id: str, description: str):
                 if f["path"] == file_path:
                     f["status"] = "building"
             status["message"] = f"⚙️  Building {file_path}..."
+            save_status(build_id, status)
 
         def on_file_done(file_path, success):
             for f in status["files"]:
@@ -148,6 +173,7 @@ async def _run_build(build_id: str, description: str):
                 status["failed_count"] += 1
             done = status["built_count"] + status["failed_count"]
             status["message"] = f"⚙️  Built {done}/{status['total_files']} files..."
+            save_status(build_id, status)
 
         project_path, built_files, failed_files = await loop.run_in_executor(
             None,
@@ -208,12 +234,14 @@ async def _run_build(build_id: str, description: str):
             "zip_b64": zip_b64,
             "blueprint": blueprint,
         }
+        save_status(build_id, status)
         print(f"✅ Build [{build_id}] complete: {project_name}")
 
     except Exception as e:
         status["stage"] = "error"
         status["error"] = str(e)
         status["message"] = f"❌ Build failed: {str(e)[:100]}"
+        save_status(build_id, status)
         print(f"❌ Build [{build_id}] failed: {e}")
 
 @app.get("/files/{project_name}")
