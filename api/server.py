@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agent.planner import generate_blueprint
 from agent.builder import build_project
 from agent.packager import run_packager
+from agent.storage import save_build, list_builds, get_zip_url, is_configured as storage_configured
 
 app = FastAPI(title="Auto Coder API")
 
@@ -221,6 +222,21 @@ async def _run_build(build_id: str, description: str):
             "blueprint": blueprint
         }
 
+        # ── STAGE 4b: Save to Supabase (persistent storage) ──
+        status["message"] = "💾 Saving to persistent storage..."
+        storage_info = await loop.run_in_executor(
+            None,
+            lambda: save_build(
+                build_id=build_id,
+                project_name=project_name,
+                description=description,
+                zip_bytes=zip_buffer.getvalue(),
+                files_count=len(built_files),
+                failed_count=len(failed_files)
+            )
+        )
+        zip_url = storage_info.get("zip_url")  # persistent public URL
+
         # ── STAGE 5: Done ──
         status["stage"] = "done"
         status["message"] = f"✅ Done! {len(built_files)} files built successfully."
@@ -231,6 +247,7 @@ async def _run_build(build_id: str, description: str):
             "files_failed": len(failed_files),
             "failed_files": failed_files,
             "download_url": f"/download/{project_name}",
+            "zip_url": zip_url,
             "zip_b64": zip_b64,
             "blueprint": blueprint,
         }
@@ -288,6 +305,11 @@ async def download(project_name: str):
     # Fallback to disk
     zip_path = f"sandbox/projects/{project_name}.zip"
     if not os.path.exists(zip_path):
+        # Last resort — try Supabase
+        zip_url = get_zip_url(project_name)
+        if zip_url:
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=zip_url)
         raise HTTPException(status_code=404, detail="Project not found")
 
     return FileResponse(
@@ -295,3 +317,19 @@ async def download(project_name: str):
         filename=f"{project_name}.zip",
         media_type="application/zip"
     )
+
+@app.get("/history")
+async def get_history():
+    """Returns list of recent builds from Supabase."""
+    if not storage_configured():
+        return {"builds": [], "message": "Storage not configured"}
+    builds = list_builds(limit=20)
+    return {"builds": builds}
+
+@app.get("/storage/status")
+async def storage_status():
+    """Check if Supabase storage is configured and working."""
+    return {
+        "configured": storage_configured(),
+        "supabase_url": os.environ.get("SUPABASE_URL", "")[:30] + "..." if os.environ.get("SUPABASE_URL") else None,
+    }
