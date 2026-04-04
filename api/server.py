@@ -190,9 +190,10 @@ async def _run_build(build_id: str, description: str):
         status["message"] = "🐳 Generating Docker + deploy config..."
 
         # Run packager — adds Dockerfile, docker-compose.yml, Makefile, DEPLOY.md
-        existing_files = await loop.run_in_executor(
+        # Note: packager reads from disk, no need to pass existing_files
+        await loop.run_in_executor(
             None,
-            lambda: run_packager(project_path, blueprint, existing_files)
+            lambda: run_packager(project_path, blueprint, {})
         )
 
         zip_buffer = io.BytesIO()
