@@ -6,7 +6,13 @@ from groq import Groq
 from openai import OpenAI
 from dotenv import load_dotenv
 from agent.tools import write_file, read_file, execute_python_code
-from agent.memory import query_experience, add_experience
+try:
+    from agent.memory import query_experience, add_experience
+    MEMORY_ENABLED = True
+except Exception:
+    MEMORY_ENABLED = False
+    def query_experience(desc): return ""
+    def add_experience(desc, code, error=None): pass
 
 load_dotenv()
 
@@ -405,7 +411,8 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
         else:
             # Multiple files — build in parallel with ThreadPoolExecutor
             # Use max 4 workers to avoid hammering the LLM API
-            max_workers = min(4, len(wave))
+            # Max 2 workers on free tier (512MB RAM limit)
+            max_workers = min(2, len(wave))
             wave_results = {}
 
             # Notify all files as "building" before starting threads
