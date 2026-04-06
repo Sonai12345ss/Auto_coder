@@ -166,10 +166,12 @@ For frontend/src/App.js:
 - Include a Navbar component with navigation links
 - NEVER add a second BrowserRouter — only one at the top level
 - Handle auth with localStorage directly — NO onLogin props passed to children
-- Auth pattern: App.js reads localStorage.getItem('token') for its own state only
-- Login/Register components handle their own redirect using useNavigate() after success:
-  Example in Login.js: const navigate = useNavigate(); ... await login(data); localStorage.setItem('token', response.token); navigate('/');
-- NEVER pass onLogin, onLogout, or setUser as props to Login or Register — they manage themselves
+- CRITICAL: ONLY import components that are explicitly listed in the blueprint files array
+- NEVER invent new component names like CreatePostPage, EditPostPage, ProfilePage — use the exact filenames from the blueprint
+- If a form is needed for creating/editing, use the existing [Resource]Form.js component with a route param
+- Example: <Route path="/posts/new" element={<PostForm />} /> and <Route path="/posts/:id/edit" element={<PostForm />} />
+- NEVER create inline placeholder components like const CreatePostPage = () => <div>...</div>
+- Login/Register components handle their own redirect using useNavigate() after success
 
 For frontend/src/api.js:
 - Use axios with baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000'

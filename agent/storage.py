@@ -51,9 +51,12 @@ def upload_zip(project_name: str, zip_bytes: bytes) -> str | None:
     url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{file_path}"
 
     try:
+        # Use upsert header so it works for both new and existing files
+        headers = _headers()
+        headers["x-upsert"] = "true"
         res = requests.post(
             url,
-            headers=_headers(),
+            headers=headers,
             data=zip_bytes,
             timeout=30
         )
@@ -61,18 +64,6 @@ def upload_zip(project_name: str, zip_bytes: bytes) -> str | None:
             public_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{file_path}"
             print(f"  ✅ ZIP uploaded: {public_url}")
             return public_url
-        elif res.status_code == 409:
-            # File exists — update it
-            res = requests.put(
-                url,
-                headers=_headers(),
-                data=zip_bytes,
-                timeout=30
-            )
-            if res.status_code in (200, 201):
-                public_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{file_path}"
-                print(f"  ✅ ZIP updated: {public_url}")
-                return public_url
         print(f"  ⚠️  ZIP upload failed: {res.status_code} {res.text[:100]}")
         return None
     except Exception as e:
