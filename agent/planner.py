@@ -23,15 +23,21 @@ def call_llm(messages):
         ("Groq-1 / llama-3.3-70b",      lambda: groq1.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
         ("Groq-2 / llama-3.3-70b",      lambda: groq2.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
         ("Groq-3 / llama-3.3-70b",      lambda: groq3.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-1 / gemini-2.0-flash",  lambda: gemini1.chat.completions.create(model="gemini-2.0-flash", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-2 / gemini-2.0-flash",  lambda: gemini2.chat.completions.create(model="gemini-2.0-flash", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-3 / gemini-2.0-flash",  lambda: gemini3.chat.completions.create(model="gemini-2.0-flash", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-1 / gemini-2.5-flash",  lambda: gemini1.chat.completions.create(model="gemini-2.5-flash", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-2 / gemini-2.5-flash",  lambda: gemini2.chat.completions.create(model="gemini-2.5-flash", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-3 / gemini-2.5-flash",  lambda: gemini3.chat.completions.create(model="gemini-2.5-flash", messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Groq-1 / gemma2-9b",          lambda: groq1.chat.completions.create(model="llama-3.1-8b-instant",            messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Groq-2 / gemma2-9b",          lambda: groq2.chat.completions.create(model="llama-3.1-8b-instant",            messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Groq-3 / gemma2-9b",          lambda: groq3.chat.completions.create(model="llama-3.1-8b-instant",            messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-1 / gemini-2.0-flash",  lambda: gemini1.chat.completions.create(model="gemini-2.0-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-2 / gemini-2.0-flash",  lambda: gemini2.chat.completions.create(model="gemini-2.0-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-3 / gemini-2.0-flash",  lambda: gemini3.chat.completions.create(model="gemini-2.0-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-1 / gemini-2.5-flash",  lambda: gemini1.chat.completions.create(model="gemini-2.5-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-2 / gemini-2.5-flash",  lambda: gemini2.chat.completions.create(model="gemini-2.5-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-3 / gemini-2.5-flash",  lambda: gemini3.chat.completions.create(model="gemini-2.5-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-1 / gemini-2.5-pro",    lambda: gemini1.chat.completions.create(model="gemini-2.5-pro-exp-03-25", messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-2 / gemini-2.5-pro",    lambda: gemini2.chat.completions.create(model="gemini-2.5-pro-exp-03-25", messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-3 / gemini-2.5-pro",    lambda: gemini3.chat.completions.create(model="gemini-2.5-pro-exp-03-25", messages=messages, temperature=0.2, max_tokens=4096)),
         ("OpenRouter / llama-3.3-70b",   lambda: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=messages, temperature=0.2, max_tokens=4096)),
         ("OpenRouter / gemma-3-27b",     lambda: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("OpenRouter / gemma-3-12b",     lambda: openrouter.chat.completions.create(model="google/gemma-3-12b-it:free",   messages=messages, temperature=0.2, max_tokens=4096)),
+        ("OpenRouter / gemma-3-12b",     lambda: openrouter.chat.completions.create(model="google/gemma-3-12b-it:free", messages=messages, temperature=0.2, max_tokens=4096)),
         # Paid fallback — only used when all free providers fail
         ("Doubleword / Qwen3.5-35B",     lambda: doubleword.chat.completions.create(model="Qwen/Qwen3.5-35B-A3B-FP8",    messages=messages, temperature=0.2, max_tokens=4096)),
         ("Doubleword / Qwen3.5-397B",    lambda: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8",  messages=messages, temperature=0.2, max_tokens=4096)),
@@ -48,6 +54,10 @@ def call_llm(messages):
                 print(f"  ⚠️  {name} rate limited, waiting {wait}s then trying next...")
                 last_error = e
                 time.sleep(wait)
+                continue
+            elif any(x in err for x in ["decommission", "deprecated", "no longer supported", "400", "invalid model"]):
+                print(f"  ⚠️  {name} model unavailable, trying next...")
+                last_error = e
                 continue
             last_error = e
             print(f"  ⚠️  {name} failed with: {str(e)[:80]}, trying next...")

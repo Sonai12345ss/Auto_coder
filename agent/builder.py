@@ -32,10 +32,10 @@ PROVIDERS = [
     {"name": "Groq-1 / llama-3.3-70b",       "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-2 / llama-3.3-70b",       "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-3 / llama-3.3-70b",       "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Groq — gemma2-9b (3 keys, separate rate limit pool)
-    {"name": "Groq-1 / gemma2-9b",           "call": lambda msgs, mt: groq1.chat.completions.create(model="gemma2-9b-it",                     messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-2 / gemma2-9b",           "call": lambda msgs, mt: groq2.chat.completions.create(model="gemma2-9b-it",                     messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-3 / gemma2-9b",           "call": lambda msgs, mt: groq3.chat.completions.create(model="gemma2-9b-it",                     messages=msgs, temperature=0.15, max_tokens=mt)},
+    # Groq — llama3-groq-70b (3 keys, separate rate limit pool)
+    {"name": "Groq-1 / llama3-70b",          "call": lambda msgs, mt: groq1.chat.completions.create(model="llama3-groq-70b-8192-tool-use-preview", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-2 / llama3-70b",          "call": lambda msgs, mt: groq2.chat.completions.create(model="llama3-groq-70b-8192-tool-use-preview", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-3 / llama3-70b",          "call": lambda msgs, mt: groq3.chat.completions.create(model="llama3-groq-70b-8192-tool-use-preview", messages=msgs, temperature=0.15, max_tokens=mt)},
     # Groq — llama-3.1-8b (3 keys, separate rate limit pool)
     {"name": "Groq-1 / llama-3.1-8b",        "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-2 / llama-3.1-8b",        "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
@@ -69,16 +69,23 @@ def call_llm(messages, max_tokens=4096):
             print(f"  🤖 Using {provider['name']}...")
             return provider["call"](messages, max_tokens)
         except Exception as e:
-            err = str(e)
-            if "rate_limit" in err or "429" in err or "quota" in err.lower() or "503" in err or "404" in err or "402" in err:
-                wait = min(2 ** (attempt % 4), 16)  # exponential backoff: 1,2,4,8,16s max
+            err = str(e).lower()
+            # Always continue to next provider — never crash the build
+            if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota", "503", "402", "temporarily", "overloaded", "upstream"]):
+                wait = min(2 ** (attempt % 4), 16)
                 print(f"  ⚠️  {provider['name']} rate limited, waiting {wait}s then trying next...")
                 last_error = e
                 time.sleep(wait)
                 continue
+            elif any(x in err for x in ["decommission", "deprecated", "no longer supported", "400", "404", "not found", "invalid model"]):
+                print(f"  ⚠️  {provider['name']} model unavailable, trying next...")
+                last_error = e
+                continue
             else:
-                raise
-    raise Exception(f"All providers rate limited. Last error: {last_error}")
+                print(f"  ⚠️  {provider['name']} error: {str(e)[:80]}, trying next...")
+                last_error = e
+                continue
+    raise Exception(f"All providers failed. Last error: {last_error}")
 
 BUILDER_PROMPT = """
 You are a senior full stack engineer with 10+ years of experience. You write production-grade code that is secure, maintainable, and complete. Your job is to write a single file as part of a larger project.
