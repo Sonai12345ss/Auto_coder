@@ -85,6 +85,13 @@ For backend/config.py:
 - Set SQLALCHEMY_TRACK_MODIFICATIONS = False
 
 For backend/models.py:
+- Use SQLAlchemy models with proper relationships using db.relationship() and backref
+- ALWAYS add db.relationship() for every foreign key — never leave FK without a relationship
+- Example: posts = db.relationship('Post', backref='author', lazy=True)
+- Include password hashing via werkzeug: generate_password_hash, check_password_hash
+- Include created_at = db.Column(db.DateTime, default=datetime.utcnow) on every model
+- Include to_dict() method on every model returning all fields as JSON-serializable dict
+- Place db.Index() OUTSIDE and AFTER class definitions, never inside
 - Use Flask-SQLAlchemy with proper column types (String, Integer, Float, Boolean, DateTime, Text)
 - Every model MUST have: id (primary key), created_at (DateTime, default=datetime.utcnow)
 - Every string field MUST have a max length: String(100), String(255), etc.
@@ -110,14 +117,16 @@ For backend/routes.py:
 
 For backend/app.py:
 - Create app factory pattern: def create_app()
-- Initialize extensions: db, jwt, CORS
+- Initialize extensions: db, jwt, CORS, migrate
+- MUST include Flask-Migrate: from flask_migrate import Migrate — then migrate = Migrate(app, db)
 - Register blueprints
 - Add a health check route: GET /health returns {"status": "ok"}
 - ALWAYS import jsonify from flask: from flask import Flask, jsonify
 - if __name__ == "__main__": app.run(debug=True, port=5000)
+- With Flask-Migrate, users run: flask db init && flask db migrate && flask db upgrade
 
 For requirements.txt:
-- Include: flask, flask-cors, flask-sqlalchemy, flask-jwt-extended, sqlalchemy, psycopg2-binary, python-dotenv, werkzeug
+- Include: flask, flask-cors, flask-sqlalchemy, flask-jwt-extended, flask-migrate, sqlalchemy, psycopg2-binary, python-dotenv, werkzeug
 
 ═══════════════════════════════════════════
 FRONTEND RULES (React)
@@ -492,6 +501,7 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
 flask-cors
 flask-sqlalchemy
 flask-jwt-extended
+flask-migrate
 sqlalchemy
 psycopg2-binary
 python-dotenv
