@@ -28,15 +28,31 @@ doubleword  = OpenAI(base_url="https://api.doubleword.ai/v1",       api_key=os.e
 
 # 3 Groq + 3x2 Gemini + 3 OpenRouter + 2 Doubleword (paid fallback) = 14 providers
 PROVIDERS = [
+    # Groq — llama-3.3-70b (3 keys)
     {"name": "Groq-1 / llama-3.3-70b",       "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-2 / llama-3.3-70b",       "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-3 / llama-3.3-70b",       "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
+    # Groq — gemma2-9b (3 keys, separate rate limit pool)
+    {"name": "Groq-1 / gemma2-9b",           "call": lambda msgs, mt: groq1.chat.completions.create(model="gemma2-9b-it",                     messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-2 / gemma2-9b",           "call": lambda msgs, mt: groq2.chat.completions.create(model="gemma2-9b-it",                     messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-3 / gemma2-9b",           "call": lambda msgs, mt: groq3.chat.completions.create(model="gemma2-9b-it",                     messages=msgs, temperature=0.15, max_tokens=mt)},
+    # Groq — llama-3.1-8b (3 keys, separate rate limit pool)
+    {"name": "Groq-1 / llama-3.1-8b",        "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-2 / llama-3.1-8b",        "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-3 / llama-3.1-8b",        "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
+    # Gemini 2.0 Flash (3 keys)
     {"name": "Gemini-1 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
+    # Gemini 2.5 Flash (3 keys)
     {"name": "Gemini-1 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
+    # Gemini 2.5 Pro (3 keys — best free model for UI quality)
+    {"name": "Gemini-1 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro-exp-03-25",       messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro-exp-03-25",       messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro-exp-03-25",       messages=msgs, temperature=0.15, max_tokens=mt)},
+    # OpenRouter free models
     {"name": "OpenRouter / llama-3.3-70b",   "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "OpenRouter / gemma-3-27b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "OpenRouter / gemma-3-12b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-12b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
