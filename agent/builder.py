@@ -6,16 +6,8 @@ from groq import Groq
 from openai import OpenAI
 from dotenv import load_dotenv
 from agent.tools import write_file, read_file, execute_python_code
-try:
-    from agent.memory import query_experience, add_experience
-    MEMORY_ENABLED = True
-except Exception:
-    MEMORY_ENABLED = False
-    def query_experience(desc): return ""
-    def add_experience(desc, code, error=None): pass
-
-# Disable memory to prevent ChromaDB downloading 79MB ONNX model on every restart
-# This was causing Render to restart mid-build due to RAM + startup time issues
+# Memory/ChromaDB disabled — was causing 79MB ONNX download on every Render restart
+# leading to mid-build server crashes on the 512MB free tier
 MEMORY_ENABLED = False
 def query_experience(desc): return ""
 def add_experience(desc, code, error=None): pass
@@ -72,12 +64,14 @@ PROVIDERS = [
 # Only best models for frontend — design needs taste
 # ─────────────────────────────────────────────
 UI_PROVIDERS = [
-    {"name": "Gemini-1 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
+    # 2.5-flash first — higher free tier RPM, still good quality
     {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
+    # 2.5-pro as fallback — best quality but lower RPM on free tier
+    {"name": "Gemini-1 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Groq-1 / llama-3.3-70b",      "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Groq-2 / llama-3.3-70b",      "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Groq-3 / llama-3.3-70b",      "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.2, max_tokens=mt)},
