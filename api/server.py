@@ -39,6 +39,7 @@ project_store = {}
 # ─────────────────────────────────────────────
 build_status_store = {}
 STATUS_DIR = "sandbox/build_status"
+active_projects = set()  # Track currently building project names
 os.makedirs(STATUS_DIR, exist_ok=True)
 
 def _status_path(build_id):
@@ -91,13 +92,45 @@ def health():
 @app.get("/status/{build_id}")
 async def get_status(build_id: str):
     """Poll this endpoint to get live build progress."""
-    # Check memory first
+    # Check memory first (fastest)
     if build_id in build_status_store:
         return build_status_store[build_id]
-    # Fall back to disk (survives server restart)
+    # Fall back to disk
     status = load_status(build_id)
     if status:
+        build_status_store[build_id] = status  # restore to memory
         return status
+    # Fall back to Supabase (survives full server restart)
+    try:
+        from agent.storage import get_build_metadata
+        meta = get_build_metadata(build_id)
+        if meta:
+            # Reconstruct a completed status from metadata
+            restored = {
+                "stage": "done" if meta.get("status") == "success" else "error",
+                "message": f"✅ Build complete — {meta.get('files_built', 0)} files built",
+                "files": [],
+                "total_files": meta.get("files_built", 0),
+                "built_count": meta.get("files_built", 0),
+                "failed_count": meta.get("files_failed", 0),
+                "project_name": meta.get("project_name"),
+                "result": {
+                    "success": True,
+                    "project_name": meta.get("project_name"),
+                    "files_built": meta.get("files_built", 0),
+                    "files_failed": meta.get("files_failed", 0),
+                    "failed_files": [],
+                    "download_url": f"/download/{meta.get('project_name')}",
+                    "zip_url": meta.get("zip_url"),
+                    "zip_b64": None,
+                    "blueprint": {},
+                },
+                "error": None,
+            }
+            build_status_store[build_id] = restored
+            return restored
+    except Exception:
+        pass
     raise HTTPException(status_code=404, detail="Build not found")
 
 @app.post("/build")
@@ -125,6 +158,7 @@ async def build(request: ProjectRequest):
 async def _run_build(build_id: str, description: str):
     """Background task: runs the full build pipeline and updates status store."""
     status = build_status_store[build_id]
+    project_name = None
 
     try:
         # ── STAGE 1: Planning ──
@@ -143,6 +177,18 @@ async def _run_build(build_id: str, description: str):
             return
 
         project_name = blueprint["project_name"]
+
+        # Prevent duplicate concurrent builds of the same project
+        if project_name in active_projects:
+            print(f"  ⚠️  [{build_id}] {project_name} already building — skipping duplicate")
+            status["stage"] = "error"
+            status["error"] = f"Project '{project_name}' is already being built"
+            status["message"] = "⚠️ Duplicate build prevented"
+            save_status(build_id, status)
+            return
+
+        active_projects.add(project_name)
+
         total = len(blueprint["files"])
         status["project_name"] = project_name
         status["total_files"] = total
@@ -261,6 +307,10 @@ async def _run_build(build_id: str, description: str):
         status["message"] = f"❌ Build failed: {str(e)[:100]}"
         save_status(build_id, status)
         print(f"❌ Build [{build_id}] failed: {e}")
+    finally:
+        # Always release project lock so future builds can proceed
+        if project_name and project_name in active_projects:
+            active_projects.discard(project_name)
 
 @app.get("/files/{project_name}")
 async def get_files(project_name: str):

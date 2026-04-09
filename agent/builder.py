@@ -49,9 +49,9 @@ PROVIDERS = [
     {"name": "Gemini-2 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     # Gemini 2.5 Pro (3 keys — best free model for UI quality)
-    {"name": "Gemini-1 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro-preview-05-06",       messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro-preview-05-06",       messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro-preview-05-06",       messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro-preview-06-05",       messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro-preview-06-05",       messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro-preview-06-05",       messages=msgs, temperature=0.15, max_tokens=mt)},
     # OpenRouter free models
     {"name": "OpenRouter / llama-3.3-70b",   "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "OpenRouter / gemma-3-27b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
@@ -66,9 +66,9 @@ PROVIDERS = [
 # Only best models for frontend — design needs taste
 # ─────────────────────────────────────────────
 UI_PROVIDERS = [
-    {"name": "Gemini-1 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro-preview-05-06",       messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro-preview-05-06",       messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro-preview-05-06",       messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro-preview-06-05",       messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro-preview-06-05",       messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro-preview-06-05",       messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
