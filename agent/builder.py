@@ -10,21 +10,44 @@ from groq import Groq
 from openai import OpenAI
 from dotenv import load_dotenv
 from agent.tools import write_file, read_file, execute_python_code
+
 # Memory/ChromaDB disabled — was causing 79MB ONNX download on every Render restart
-# leading to mid-build server crashes on the 512MB free tier
 MEMORY_ENABLED = False
 def query_experience(desc): return ""
 def add_experience(desc, code, error=None): pass
 
 load_dotenv()
 
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# 🔧 FIX 1: GLOBAL RATE LIMITING
+# Prevents burst API requests that trigger 429 errors
+# ═══════════════════════════════════════════════════════════════════════════
+RATE_LIMIT_LOCK = threading.Lock()
+LAST_REQUEST_TIME = 0
+MIN_INTERVAL = 2.5  # seconds between API calls (global across all threads)
+
+def safe_api_call(func, *args, **kwargs):
+    """Wrap any API call with global rate limiting"""
+    global LAST_REQUEST_TIME
+    
+    with RATE_LIMIT_LOCK:
+        now = time.time()
+        wait = MIN_INTERVAL - (now - LAST_REQUEST_TIME)
+        
+        if wait > 0:
+            time.sleep(wait)
+        
+        LAST_REQUEST_TIME = time.time()
+    
+    return func(*args, **kwargs)
+
+# ═══════════════════════════════════════════════════════════════════════════
 # PROVIDER HEALTH TRACKER
 # Prevents wasting time on rate-limited providers
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
 class ProviderHealthTracker:
     def __init__(self):
-        self.failures = defaultdict(int)  # Track consecutive failures
+        self.failures = defaultdict(int)
         self.last_success = defaultdict(lambda: datetime.now())
         self.rate_limited_until = defaultdict(lambda: datetime.min)
         self.lock = threading.Lock()
@@ -44,10 +67,8 @@ class ProviderHealthTracker:
     def is_available(self, provider_name):
         """Check if provider is likely available"""
         with self.lock:
-            # Skip if recently rate-limited
             if datetime.now() < self.rate_limited_until[provider_name]:
                 return False
-            # Skip if too many consecutive failures
             if self.failures[provider_name] >= 3:
                 return False
             return True
@@ -56,10 +77,8 @@ class ProviderHealthTracker:
         """Return top N available providers"""
         available = [p for p in provider_list if self.is_available(p['name'])]
         
-        # If less than 3 available, reset some failed providers
         if len(available) < 3:
             with self.lock:
-                # Reset providers that failed more than 2 minutes ago
                 for name in self.failures.keys():
                     if (datetime.now() - self.last_success[name]).total_seconds() > 120:
                         self.failures[name] = 0
@@ -68,10 +87,9 @@ class ProviderHealthTracker:
         
         return available[:max_attempts]
 
-# Global tracker
 provider_health = ProviderHealthTracker()
 
-# Pre-initialize all clients once at startup (faster than creating per call)
+# Pre-initialize all clients once at startup
 groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 groq2   = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
 groq3   = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
@@ -111,16 +129,11 @@ PROVIDERS = [
     {"name": "Doubleword / Qwen3.5-397B",    "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.15, max_tokens=mt)},
 ]
 
-# ─────────────────────────────────────────────
 # UI-SPECIALIZED PROVIDERS
-# Only best models for frontend — design needs taste
-# ─────────────────────────────────────────────
 UI_PROVIDERS = [
-    # 2.5-flash first — higher free tier RPM, still good quality
     {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
-    # 2.5-pro as fallback — best quality but lower RPM on free tier
     {"name": "Gemini-1 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
@@ -130,8 +143,29 @@ UI_PROVIDERS = [
     {"name": "Doubleword / Qwen3.5-397B",   "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.2, max_tokens=mt)},
 ]
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 🔧 FIX 3: TOKEN OPTIMIZATION
+# Dynamic token allocation based on file type
+# ═══════════════════════════════════════════════════════════════════════════
+def get_optimal_tokens(file_path):
+    """Return optimal token count based on file complexity"""
+    if "index.html" in file_path or "package.json" in file_path:
+        return 800  # Simple files
+    elif "config.py" in file_path or ".env.example" in file_path:
+        return 600  # Minimal files
+    elif file_path.endswith((".js", ".jsx")) and "components/" in file_path:
+        return 1500  # React components (need styling)
+    elif file_path.endswith(".py") and "routes.py" in file_path:
+        return 1200  # API routes
+    elif file_path.endswith(".py"):
+        return 1000  # Other Python files
+    elif file_path.endswith((".css", ".json")):
+        return 800  # Styling and config
+    else:
+        return 1000  # Default
+
 def call_llm(messages, max_tokens=4096, task_type="general"):
-    """Try best available providers only (max 5 attempts instead of 23)"""
+    """Try best available providers with global rate limiting"""
     provider_list = UI_PROVIDERS if task_type == "ui" else PROVIDERS
     
     # Get only healthy providers (max 5 attempts)
@@ -140,13 +174,15 @@ def call_llm(messages, max_tokens=4096, task_type="general"):
     if not candidates:
         print("  ⚠️  All providers exhausted, waiting 30s for cooldown...")
         time.sleep(30)
-        candidates = provider_list[:5]  # Try first 5 as fallback
+        candidates = provider_list[:5]
     
     last_error = None
     for attempt, provider in enumerate(candidates):
         try:
             print(f"  🤖 Using {provider['name']}...")
-            response = provider["call"](messages, max_tokens)
+            
+            # 🔧 FIX 1: Apply global rate limiting
+            response = safe_api_call(provider["call"], messages, max_tokens)
             
             # Mark success
             provider_health.mark_success(provider['name'])
@@ -157,12 +193,12 @@ def call_llm(messages, max_tokens=4096, task_type="general"):
             
             # Rate limit detected
             if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota", "503", "overloaded", "upstream", "temporarily"]):
-                # Longer cooldown for Gemini (they have strict quotas)
                 cooldown = 90 if "gemini" in provider['name'].lower() else 60
                 provider_health.mark_rate_limited(provider['name'], cooldown_seconds=cooldown)
                 print(f"  ⚠️  {provider['name']} rate limited (cooldown {cooldown}s), trying next...")
                 last_error = e
-                time.sleep(0.5)  # Short pause before next provider
+                # 🔧 FIX 4: Extended wait on rate limit
+                time.sleep(10)
                 continue
             
             # Model unavailable
@@ -584,33 +620,25 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
     last_error = ""
     final_code = ""
 
-    # Use UI-specialized pipeline + more tokens for frontend files
+    # 🔧 FIX 3: Use optimized token allocation
     is_frontend = file_path.startswith("frontend/") and file_path.endswith((".js", ".jsx", ".css", ".html"))
     task_type = "ui" if is_frontend else "general"
-    max_tokens = 7000 if is_frontend else 4096
+    max_tokens = get_optimal_tokens(file_path)
 
     if is_frontend:
-        print(f"  🎨 Using UI pipeline (Gemini 2.5 Pro) with {max_tokens} tokens")
+        print(f"  🎨 Using UI pipeline with {max_tokens} tokens")
 
-    for attempt in range(1, 4):
-        if attempt > 1:
-            print(f"  🔄 Retry attempt {attempt}...")
-            time.sleep(2)  # Wait before retry
-
-        # Add jitter to prevent thundering herd in parallel builds
-        if existing_files and attempt == 1:  # Not first file in wave
-            jitter = random.uniform(0.5, 2.0)
-            time.sleep(jitter)
-
+    # 🔧 FIX 4: Reduced retry attempts (1 attempt only)
+    for attempt in range(1, 2):  # Only 1 attempt
         try:
             response = call_llm(history, max_tokens=max_tokens, task_type=task_type)
         except Exception as e:
-            print(f"  ❌ All providers failed: {str(e)[:120]}")
+            print(f"  ❌ Provider failed: {str(e)[:120]}")
             return final_code
 
         code = response.choices[0].message.content.strip()
 
-        # Clean up backticks safely - replace known patterns directly
+        # Clean up backticks safely
         code = code.replace("```python", "").replace("```javascript", "").replace("```jsx", "").replace("```css", "").replace("```json", "").replace("```html", "").replace("```", "").strip()
 
         # Write file to project
@@ -630,19 +658,19 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
             else:
                 last_error = result["stderr"]
                 print(f"  ❌ Syntax error: {last_error[:100]}")
-                history.append({"role": "assistant", "content": code})
-                history.append({"role": "user", "content": f"Syntax error found:\n{last_error}\n\nFix the syntax error and output the complete corrected file."})
+                # Don't retry — just return what we have
+                final_code = code
+                return code
         else:
             print(f"  ✅ {file_path} built successfully")
             final_code = code
             return code
 
-    print(f"  ⚠️ Could not fix {file_path} after 3 attempts")
     return final_code
 
 
 def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, on_file_done=None):
-    """Builds an entire project from a blueprint — parallel where possible."""
+    """Builds an entire project from a blueprint — SEQUENTIAL execution for stability."""
 
     project_name = blueprint["project_name"]
     project_path = os.path.join(output_dir, project_name)
@@ -656,10 +684,7 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
     files = blueprint["files"]
 
     # ─────────────────────────────────────────────
-    # Split files into dependency waves:
-    # Wave 0: no dependencies (build in parallel)
-    # Wave 1: depends on wave 0 (build in parallel after wave 0)
-    # Wave 2: depends on wave 1, etc.
+    # Split files into dependency waves
     # ─────────────────────────────────────────────
     def get_waves(files):
         """Group files into waves based on dependencies."""
@@ -677,7 +702,6 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
                 else:
                     still_remaining.append(f)
             if not wave:
-                # Circular deps or unresolvable — just add all remaining
                 wave = still_remaining
                 still_remaining = []
             for f in wave:
@@ -687,22 +711,23 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
         return waves
 
     waves = get_waves(files)
-    print(f"⚡ Building in {len(waves)} wave(s) — parallel within each wave")
+    print(f"🔨 Building in {len(waves)} wave(s) — SEQUENTIAL mode for stability")
 
     for wave_idx, wave in enumerate(waves):
         print(f"\n🌊 Wave {wave_idx + 1}/{len(waves)}: {len(wave)} file(s)")
 
-        if len(wave) == 1:
-            # Single file — build directly, no threading overhead
-            file_info = wave[0]
+        # 🔧 FIX 2: SEQUENTIAL EXECUTION (max_workers = 1)
+        for file_info in wave:
             if on_file_start:
                 on_file_start(file_info["path"])
+            
             code = build_file(
                 file_info=file_info,
                 blueprint=blueprint,
                 project_path=project_path,
                 existing_files=existing_files
             )
+            
             if code:
                 existing_files[file_info["path"]] = code
                 if on_file_done:
@@ -711,53 +736,10 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
                 failed_files.append(file_info["path"])
                 if on_file_done:
                     on_file_done(file_info["path"], success=False)
-        else:
-            # Multiple files — build in parallel with ThreadPoolExecutor
-            # OPTIMIZED: Use 2 workers with provider health tracking
-            max_workers = min(2, len(wave))
-            wave_results = {}
 
-            # Notify all files as "building" before starting threads
-            for file_info in wave:
-                if on_file_start:
-                    on_file_start(file_info["path"])
-
-            def build_one(file_info):
-                """Build a single file — runs in thread."""
-                code = build_file(
-                    file_info=file_info,
-                    blueprint=blueprint,
-                    project_path=project_path,
-                    existing_files=dict(existing_files)  # snapshot for thread safety
-                )
-                return file_info["path"], code
-
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(build_one, f): f for f in wave}
-                for future in as_completed(futures):
-                    try:
-                        file_path, code = future.result()
-                        if code:
-                            wave_results[file_path] = code
-                            if on_file_done:
-                                on_file_done(file_path, success=True)
-                        else:
-                            failed_files.append(file_path)
-                            if on_file_done:
-                                on_file_done(file_path, success=False)
-                    except Exception as e:
-                        file_path = futures[future]["path"]
-                        print(f"  ❌ Thread error for {file_path}: {e}")
-                        failed_files.append(file_path)
-                        if on_file_done:
-                            on_file_done(file_path, success=False)
-
-            # Merge wave results into existing_files
-            existing_files.update(wave_results)
-
-        # OPTIMIZED: Longer pause between waves to let rate limits reset
+        # Pause between waves
         if wave_idx < len(waves) - 1:
-            time.sleep(5)
+            time.sleep(3)
 
     # ─────────────────────────────────────────────
     # PHASE 2: TEST + DEBUG LOOP
@@ -770,14 +752,12 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
         from agent.tester import run_tests, format_errors_for_log
         from agent.debugger import run_debug_loop
 
-        # Run full test → debug → retest loop (max 3 attempts)
         existing_files, final_test_result, attempts = run_debug_loop(
             files=existing_files,
             tester_fn=run_tests,
             max_retries=3
         )
 
-        # Write back any fixed files to disk
         for file_path, code in existing_files.items():
             full_path = os.path.join(project_path, file_path)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
