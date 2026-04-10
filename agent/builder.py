@@ -4,7 +4,6 @@ import json
 import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from groq import Groq
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -16,22 +15,6 @@ def query_experience(desc): return ""
 def add_experience(desc, code, error=None): pass
 
 load_dotenv()
-
-# ═══════════════════════════════════════════════════════════════
-# GLOBAL RATE LIMITER — prevents burst API requests hitting 429
-# ═══════════════════════════════════════════════════════════════
-_RATE_LIMIT_LOCK = threading.Lock()
-_LAST_REQUEST_TIME = 0
-_MIN_INTERVAL = 2.0  # seconds between API calls globally
-
-def _throttle():
-    global _LAST_REQUEST_TIME
-    with _RATE_LIMIT_LOCK:
-        now = time.time()
-        wait = _MIN_INTERVAL - (now - _LAST_REQUEST_TIME)
-        if wait > 0:
-            time.sleep(wait)
-        _LAST_REQUEST_TIME = time.time()
 
 # ═══════════════════════════════════════════════════════════════
 # PROVIDER HEALTH TRACKER — skip rate-limited providers
@@ -64,119 +47,196 @@ class ProviderHealth:
 
 _health = ProviderHealth()
 
-# Pre-initialize all clients once at startup (faster than creating per call)
-groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
-groq2   = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
-groq3   = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
-gemini1 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY", ""))
-gemini2 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_2", ""))
-gemini3 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_3", ""))
-openrouter  = OpenAI(base_url="https://openrouter.ai/api/v1",      api_key=os.environ.get("OPENROUTER_API_KEY", ""))
-doubleword  = OpenAI(base_url="https://api.doubleword.ai/v1",       api_key=os.environ.get("DOUBLEWORD_API_KEY", ""))
+# Pre-initialize all clients once at startup
+groq1      = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+groq2      = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
+groq3      = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
+gemini1    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY", ""))
+gemini2    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_2", ""))
+gemini3    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_3", ""))
+openrouter = OpenAI(base_url="https://openrouter.ai/api/v1",       api_key=os.environ.get("OPENROUTER_API_KEY", ""))
+doubleword = OpenAI(base_url="https://api.doubleword.ai/v1",        api_key=os.environ.get("DOUBLEWORD_API_KEY", ""))
 
-# OPTIMIZED PROVIDER ORDER: highest free quota first
-# gemini-2.0-flash: 1500 RPD free | groq: 14400 RPD | 2.5-flash: 1000 RPD | 2.5-pro: 50 RPD
+# ═══════════════════════════════════════════════════════════════
+# PROVIDER ORDER: diverse rotation — Gemini → Groq → OpenRouter → fallback
+# Never 3x same service in a row (prevents same-quota exhaustion)
+# ═══════════════════════════════════════════════════════════════
 PROVIDERS = [
-    # Gemini 2.0 Flash FIRST — highest free daily quota (1500 req/day × 3 keys)
+    # Interleaved: Gemini-2.0 and Groq alternating (different quota pools)
     {"name": "Gemini-1 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Groq llama-3.3-70b SECOND — fast, generous free tier
     {"name": "Groq-1 / llama-3.3-70b",       "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-2 / llama-3.3-70b",       "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-3 / llama-3.3-70b",       "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Groq llama-3.1-8b THIRD — highest Groq RPM limit
+    # OpenRouter as mid-tier backup
+    {"name": "OpenRouter / llama-3.3-70b",   "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "OpenRouter / gemma-3-27b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
+    # Groq smaller model — higher RPM quota
     {"name": "Groq-1 / llama-3.1-8b",        "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-2 / llama-3.1-8b",        "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-3 / llama-3.1-8b",        "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
-    # OpenRouter free models FOURTH
-    {"name": "OpenRouter / llama-3.3-70b",   "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "OpenRouter / gemma-3-27b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
     # Gemini 2.5 Flash — good quality, moderate quota
     {"name": "Gemini-1 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Gemini 2.5 Pro — best quality but lowest quota (2 RPM on free tier)
-    {"name": "Gemini-1 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
     # Paid fallback — only used when all free providers fail
     {"name": "Doubleword / Qwen3.5-35B",     "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-35B-A3B-FP8",   messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Doubleword / Qwen3.5-397B",    "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.15, max_tokens=mt)},
 ]
 
-# UI pipeline — flash first (higher RPM), pro as fallback
+# UI pipeline — flash first (higher RPM for UI files), fall through to PROVIDERS
 UI_PROVIDERS = [
-    {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-1 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Groq-1 / llama-3.3-70b",      "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Groq-2 / llama-3.3-70b",      "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Groq-3 / llama-3.3-70b",      "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Doubleword / Qwen3.5-397B",   "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.2, max_tokens=mt)},
+    # Fall through to PROVIDERS if all flash keys are rate limited
 ]
 
 # ─────────────────────────────────────────────
-# TOKEN OPTIMIZER — right-size tokens per file type
+# TOKEN SIZES — right-sized per file type
 # ─────────────────────────────────────────────
 def get_optimal_tokens(file_path):
-    if file_path.endswith(("package.json", "index.html", ".env.example")):
-        return 800
-    elif file_path.endswith(("config.py", "index.css")):
-        return 600
-    elif "components/" in file_path and file_path.endswith((".js", ".jsx")):
-        return 1800  # React components need styling room
-    elif "routes.py" in file_path:
-        return 1500  # API routes can be long
-    elif file_path.endswith(".py"):
-        return 1200
-    elif file_path.endswith(("App.js", "api.js", "index.js")):
-        return 1200
-    else:
+    if file_path.endswith("config.py") or file_path.endswith(".env.example"):
         return 1000
+    elif file_path.endswith("package.json") or file_path.endswith("index.html"):
+        return 1200
+    elif file_path.endswith("index.css"):
+        return 800
+    elif "components/" in file_path and file_path.endswith((".js", ".jsx")):
+        return 2500  # React components need space for Tailwind + logic
+    elif "routes.py" in file_path:
+        return 2200  # API routes can be very long
+    elif "App.js" in file_path or "api.js" in file_path:
+        return 2000
+    elif "models.py" in file_path:
+        return 1800
+    elif file_path.endswith(".py"):
+        return 1500
+    else:
+        return 1500
 
+# ─────────────────────────────────────────────
+# FIX 1: SAFE RESPONSE EXTRACTION
+# Prevents NoneType.strip() crash
+# ─────────────────────────────────────────────
+def extract_code(response):
+    """Safely extract code from LLM response. Returns None if response is invalid."""
+    try:
+        if not response or not response.choices:
+            return None
+        msg = response.choices[0].message
+        if not msg or not msg.content:
+            return None
+        content = msg.content.strip()
+        if not content:
+            return None
+        return content
+    except Exception as e:
+        print(f"  ⚠️  Response extraction error: {e}")
+        return None
+
+# ─────────────────────────────────────────────
+# FIX 2: CODE QUALITY VALIDATION
+# Catches empty/garbage output before saving
+# ─────────────────────────────────────────────
+def is_bad_code(code, file_path):
+    """Returns True if the code is too short, empty, or clearly invalid."""
+    if not code:
+        return True
+    stripped = code.strip()
+    if len(stripped) < 50:
+        return True
+    # Check for obvious stubs
+    stub_indicators = ["# TODO", "# FIXME", "pass  # placeholder", "raise NotImplementedError"]
+    if any(s in stripped for s in stub_indicators):
+        return True
+    return False
+
+# ─────────────────────────────────────────────
+# FIX 3: JS STRUCTURAL VALIDATION
+# Catches blank/broken JS files that Python checker misses
+# ─────────────────────────────────────────────
+def validate_js_structure(code, file_path):
+    """Basic structural check for JS/JSX files."""
+    if not code or len(code.strip()) < 30:
+        return False, "Empty or too short"
+    # Must have either export or function or class
+    has_export = "export" in code
+    has_function = "function" in code or "=>" in code or "const " in code
+    has_class = "class " in code
+    if not (has_export or has_function or has_class):
+        return False, "No export, function, or class found"
+    # Special checks per file
+    if "App.js" in file_path and "BrowserRouter" not in code and "Routes" not in code:
+        return False, "App.js missing routing (BrowserRouter/Routes)"
+    if "api.js" in file_path and "axios" not in code:
+        return False, "api.js missing axios"
+    if "PrivateRoute.js" in file_path and "localStorage" not in code:
+        return False, "PrivateRoute.js missing localStorage check"
+    return True, "ok"
+
+# ─────────────────────────────────────────────
+# MAIN LLM CALLER
+# Two-pass: available providers first, then all providers
+# ─────────────────────────────────────────────
 def call_llm(messages, max_tokens=4096, task_type="general"):
-    """Try providers in order, skipping rate-limited ones. Uses global throttle."""
-    provider_list = UI_PROVIDERS if task_type == "ui" else PROVIDERS
+    """
+    Try providers in order, skipping rate-limited ones.
+    UI files try UI_PROVIDERS first, then fall through to PROVIDERS.
+    Two passes: first pass skips blocked providers, second pass tries everything.
+    """
+    # Build full candidate list
+    if task_type == "ui":
+        full_list = UI_PROVIDERS + PROVIDERS
+    else:
+        full_list = PROVIDERS
+
     last_error = None
 
-    # Filter to available providers, fall back to all if everything blocked
-    available = [p for p in provider_list if _health.is_available(p['name'])]
-    if not available:
-        print("  ⚠️  All providers in cooldown — resetting and retrying...")
-        _health.reset_all()
-        available = provider_list
+    for pass_num in range(2):
+        for provider in full_list:
+            name = provider["name"]
 
-    for provider in available:
-        try:
-            print(f"  🤖 Using {provider['name']}...")
-            _throttle()  # Global rate limiter — prevents burst 429s
-            response = provider["call"](messages, max_tokens)
-            _health.ok(provider['name'])
-            return response
-
-        except Exception as e:
-            err = str(e).lower()
-            if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota", "503", "402", "temporarily", "overloaded", "upstream"]):
-                cooldown = 120 if "gemini" in provider['name'].lower() else 60
-                _health.block(provider['name'], seconds=cooldown)
-                print(f"  ⚠️  {provider['name']} rate limited (cooldown {cooldown}s), skipping...")
-                last_error = e
-                continue
-            elif any(x in err for x in ["decommission", "deprecated", "no longer supported", "invalid model"]):
-                _health.block(provider['name'], seconds=600)
-                print(f"  ⚠️  {provider['name']} model unavailable, skipping...")
-                last_error = e
-                continue
-            else:
-                print(f"  ⚠️  {provider['name']} error: {str(e)[:80]}, trying next...")
-                last_error = e
+            # First pass: skip blocked providers
+            if pass_num == 0 and not _health.is_available(name):
                 continue
 
-    raise Exception(f"All providers failed. Last error: {last_error}")
+            try:
+                print(f"  🤖 Using {name}...")
+                response = provider["call"](messages, max_tokens)
+                _health.ok(name)
+                return response
+
+            except Exception as e:
+                err = str(e).lower()
+
+                if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota",
+                                           "503", "402", "temporarily", "overloaded", "upstream"]):
+                    cooldown = 120 if "gemini" in name.lower() else 60
+                    _health.block(name, seconds=cooldown)
+                    print(f"  ⚠️  {name} rate limited (cooldown {cooldown}s), skipping...")
+                    last_error = e
+                    continue
+
+                elif any(x in err for x in ["decommission", "deprecated", "no longer supported",
+                                             "invalid model", "model not found", "404", "400"]):
+                    _health.block(name, seconds=3600)  # Dead for this session
+                    print(f"  ⚠️  {name} model unavailable, skipping...")
+                    last_error = e
+                    continue
+
+                else:
+                    print(f"  ⚠️  {name}: {str(e)[:80]}, trying next...")
+                    last_error = e
+                    continue
+
+        if pass_num == 0:
+            print("  ⏳ All preferred providers busy — trying all providers (second pass)...")
+            _health.reset_all()  # Reset blocks for second pass
+
+    raise Exception(f"All providers exhausted. Last error: {last_error}")
+
 
 BUILDER_PROMPT = """
 You are a senior full stack engineer with 10+ years of experience. You write production-grade code that is secure, maintainable, and complete. Your job is to write a single file as part of a larger project.
@@ -209,7 +269,7 @@ For backend/models.py:
 - Use Flask-SQLAlchemy with proper column types (String, Integer, Float, Boolean, DateTime, Text)
 - Every model MUST have: id (primary key), created_at (DateTime, default=datetime.utcnow)
 - Every string field MUST have a max length: String(100), String(255), etc.
-- Add db.Index() for any foreign key column — MUST be placed OUTSIDE and AFTER the class definition, never inside it. Example: db.Index('ix_user_id', MyModel.user_id)
+- Add db.Index() for any foreign key column — MUST be placed OUTSIDE and AFTER the class definition
 - Add __repr__ for every model
 - to_dict() method must include ALL fields, converting datetime with .isoformat()
 - Hash passwords using werkzeug.security.generate_password_hash — NEVER store plain text passwords
@@ -218,9 +278,9 @@ For backend/models.py:
 For backend/routes.py:
 - Generate EVERY endpoint from the blueprint api_endpoints — never skip any
 - Every POST/PUT endpoint MUST validate required fields and return 400 with clear error messages if missing
-- Login endpoint MUST accept username field (not email) to match the Register form: data.get('username'), data.get('password')
+- Login endpoint MUST accept username field (not email): data.get('username'), data.get('password')
 - Register endpoint MUST accept: username, email, password
-- Login success response MUST return a JWT token: {"token": create_access_token(identity=user.id), "user": user.to_dict()}
+- Login success response MUST return: {"token": create_access_token(identity=user.id), "user": user.to_dict()}
 - Every GET list endpoint MUST support pagination: ?page=1&per_page=20 using .paginate()
 - Return paginated responses as: {"items": [...], "total": n, "page": n, "pages": n}
 - Every DELETE endpoint returns {"message": "Deleted successfully"}
@@ -237,7 +297,6 @@ For backend/app.py:
 - Add a health check route: GET /health returns {"status": "ok"}
 - ALWAYS import jsonify from flask: from flask import Flask, jsonify
 - if __name__ == "__main__": app.run(debug=True, port=5000)
-- With Flask-Migrate, users run: flask db init && flask db migrate && flask db upgrade
 
 For requirements.txt:
 - Include: flask, flask-cors, flask-sqlalchemy, flask-jwt-extended, flask-migrate, sqlalchemy, psycopg2-binary, python-dotenv, werkzeug
@@ -250,41 +309,11 @@ For frontend/src/App.js:
 - MUST contain real routing using React Router v6 (BrowserRouter, Routes, Route)
 - Include routes for every major page inferred from the blueprint
 - Include a Navbar component with navigation links
-- Handle auth state: check localStorage for JWT token, show login/logout accordingly
-- Every page component must be imported and rendered — no empty shells
-
-For frontend/src/api.js:
-- Use axios with baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000'
-- Add axios request interceptor to inject Authorization: Bearer <token> from localStorage
-- Add axios response interceptor: on 401, clear localStorage and redirect to /login
-- Export individual async functions for EVERY API endpoint in the blueprint
-- Each function uses try/catch and re-throws errors for the caller to handle
-
-For frontend/public/index.html:
-- Standard React HTML template with <div id="root"></div>
-- Include proper meta charset, viewport tags
-- Title should match the project name
-- Include Tailwind CSS CDN: <script src="https://cdn.tailwindcss.com"></script>
-- Include Google Fonts: Inter font family
-
-For frontend/src/index.js:
-- MUST use React 18 createRoot API: const root = ReactDOM.createRoot(document.getElementById('root')); root.render(<React.StrictMode><App /></React.StrictMode>)
-- NEVER wrap App in BrowserRouter here — App.js already has BrowserRouter
-- NEVER use ReactDOM.render() — it is deprecated in React 18
-- NEVER add empty imports like import {} from 'react-router-dom' — only import what is actually used
-- Only import: react, react-dom/client, ./index.css, ./App
-
-For frontend/src/App.js:
-- MUST contain real routing using React Router v6 (BrowserRouter, Routes, Route)
-- Include routes for every major page inferred from the blueprint
-- Include a Navbar component with navigation links
 - NEVER add a second BrowserRouter — only one at the top level
 - Handle auth with localStorage directly — NO onLogin props passed to children
 - CRITICAL: ONLY import components that are explicitly listed in the blueprint files array
-- NEVER invent new component names like CreatePostPage, EditPostPage, ProfilePage — use the exact filenames from the blueprint
-- If a form is needed for creating/editing, use the existing [Resource]Form.js component with a route param
-- Example: <Route path="/posts/new" element={<PostForm />} /> and <Route path="/posts/:id/edit" element={<PostForm />} />
-- NEVER create inline placeholder components like const CreatePostPage = () => <div>...</div>
+- NEVER invent new component names like CreatePostPage, EditPostPage, ProfilePage
+- If a form is needed for creating/editing, use the existing [Resource]Form.js with a route param
 - Login/Register components handle their own redirect using useNavigate() after success
 
 For frontend/src/api.js:
@@ -292,16 +321,21 @@ For frontend/src/api.js:
 - Add axios request interceptor to inject Authorization: Bearer <token> from localStorage
 - Add axios response interceptor: on 401, clear localStorage and redirect to /login
 - Export individual async functions for EVERY API endpoint in the blueprint
-- Each function uses try/catch and re-throws errors for the caller to handle
 - NEVER export the axios instance as default — only export named functions
-- NEVER import the axios instance directly in components — always import named functions
-  Correct: import { getProducts, login } from '../api'
-  Wrong: import axios from '../api' or import api from '../api'
+- Correct: import { getProducts, login } from '../api'
+
+For frontend/public/index.html:
+- Standard React HTML template with <div id="root"></div>
+- Include Tailwind CSS CDN: <script src="https://cdn.tailwindcss.com"></script>
+- Include Google Fonts: Inter font family
+
+For frontend/src/index.js:
+- MUST use React 18 createRoot API
+- NEVER wrap App in BrowserRouter here — App.js already has BrowserRouter
+- NEVER use ReactDOM.render() — deprecated in React 18
+- NEVER add empty imports like import {} from 'react-router-dom'
 
 For frontend/src/components/PrivateRoute.js:
-- A route guard component that checks localStorage for a JWT token
-- If token exists: render the child component (use React Router v6 Outlet pattern)
-- If no token: redirect to /login using Navigate from react-router-dom
 - Exact implementation:
   import React from 'react';
   import { Navigate, Outlet } from 'react-router-dom';
@@ -310,18 +344,10 @@ For frontend/src/components/PrivateRoute.js:
     return token ? <Outlet /> : <Navigate to="/login" replace />;
   };
   export default PrivateRoute;
-- App.js must wrap all protected routes with PrivateRoute:
-  <Route element={<PrivateRoute />}>
-    <Route path="/dashboard" element={<Dashboard />} />
-    <Route path="/orders" element={<OrderList />} />
-    <Route path="/cart" element={<Cart />} />
-  </Route>
-- Public routes (login, register, home) must NOT be inside PrivateRoute
-
 
 - ALL styling MUST use Tailwind CSS utility classes. Never write inline styles or import CSS files.
 - NEVER import individual CSS files per component (no './Home.css' etc.)
-- NEVER link to internal API URLs in the UI (never show /api/posts as a link)
+- NEVER link to internal API URLs in the UI
 
 ═══════════════════════════════════════════
 UI DESIGN PATTERNS (copy these exactly)
@@ -333,7 +359,6 @@ NAVBAR pattern — dark, sticky, professional:
       <div className="flex items-center justify-between h-16">
         <Link to="/" className="text-white font-bold text-xl tracking-tight">AppName</Link>
         <div className="flex items-center gap-6">
-          <Link to="/posts" className="text-gray-300 hover:text-white transition text-sm font-medium">Posts</Link>
           {user ? (
             <div className="flex items-center gap-4">
               <span className="text-gray-300 text-sm">Hi, {user.username}</span>
@@ -352,18 +377,16 @@ NAVBAR pattern — dark, sticky, professional:
 
 HOME page pattern — hero section with gradient, feature cards:
   <div className="min-h-screen bg-gray-50">
-    {/* Hero */}
     <div className="bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 text-white py-24 px-4">
       <div className="max-w-4xl mx-auto text-center">
         <h1 className="text-5xl font-bold mb-6 leading-tight">App Title Here</h1>
-        <p className="text-xl text-indigo-100 mb-10 max-w-2xl mx-auto">One line description of what this app does.</p>
+        <p className="text-xl text-indigo-100 mb-10 max-w-2xl mx-auto">Description here.</p>
         <div className="flex flex-col sm:flex-row gap-4 justify-center">
           <Link to="/register" className="bg-white text-indigo-600 font-bold px-8 py-3 rounded-xl hover:bg-indigo-50 transition shadow-lg">Get Started Free</Link>
           <Link to="/login" className="border-2 border-white text-white font-bold px-8 py-3 rounded-xl hover:bg-white hover:text-indigo-600 transition">Sign In</Link>
         </div>
       </div>
     </div>
-    {/* Feature cards */}
     <div className="max-w-6xl mx-auto px-4 py-16">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
         <div className="bg-white rounded-2xl shadow-md p-8 hover:shadow-xl transition">
@@ -465,7 +488,7 @@ FORM page pattern — clean centered form:
   </div>
 
 GENERAL UI RULES:
-- Use rounded-2xl for cards and modals (not rounded-xl)
+- Use rounded-2xl for cards and modals
 - Use shadow-md normally, shadow-xl on hover
 - Avatar initials: first letter of username in a colored circle
 - Dates: always use toLocaleDateString() not raw ISO string
@@ -475,68 +498,33 @@ GENERAL UI RULES:
 - NEVER use bullet point lists as page features — use feature cards with icons instead
 
 For frontend/src/components/ files — HOOKS & BUG-FREE RULES:
-- Every component must use React hooks: useState for local state, useEffect for data fetching
 - CRITICAL: Every useEffect MUST have a dependency array []. NEVER write useEffect(() => {}) without []
-- Correct: useEffect(() => { fetchData() }, []) — runs once on mount only
-- CRITICAL: Navbar MUST check localStorage.getItem('token') before calling getUser(). If no token, skip API call entirely.
-- CRITICAL: All error handling must check if error.response exists before accessing error.response.status
-  Safe pattern: const msg = error.response?.data?.message || error.message || 'Something went wrong'
+- CRITICAL: Navbar MUST check localStorage.getItem('token') before calling getUser(). If no token, skip API call.
+- CRITICAL: All error handling must use: const msg = error.response?.data?.message || error.message || 'Something went wrong'
 - Forms must have controlled inputs with onChange handlers and onSubmit with preventDefault()
 - After successful POST/PUT/DELETE, refresh the data list automatically
-- NEVER import LoadingSpinner, Pagination, ErrorAlert or any helper component not in the blueprint file list
+- NEVER import LoadingSpinner, Pagination, ErrorAlert or any helper not in the blueprint
 - Write loading/error/empty/pagination logic INLINE
-- Loading inline: {loading && <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-10 w-10 border-4 border-indigo-600 border-t-transparent"></div></div>}
 - ONLY import from: react, react-router-dom, ../api
 
 For frontend/package.json:
 - Include: react, react-dom, react-scripts, axios, react-router-dom as dependencies
-- Include start, build, test scripts
-- Set proxy: "http://localhost:5000" for development
+- Set proxy: "http://localhost:5000"
 
 For frontend/src/index.css:
-- Minimal CSS — just body font-family: 'Inter', sans-serif and box-sizing: border-box
-- All real styling is done via Tailwind classes in components
+- Minimal CSS — just body font-family and box-sizing
 
-═══════════════════════════════════════════
-GENERAL FILES
-═══════════════════════════════════════════
+QUALITY BAR: Code must be indistinguishable from a senior engineer's work. Immediately runnable with no modifications beyond .env values.
 
-For .env.example:
-- Include: DATABASE_URL, SECRET_KEY, JWT_SECRET_KEY, DEBUG, FLASK_ENV, REACT_APP_API_URL
-
-For README.md:
-- Include: project description, tech stack, prerequisites, setup steps (backend + frontend), environment variables table, API endpoints table with method/path/description/auth columns
-
-QUALITY BAR: The code you write must be indistinguishable from code written by a senior engineer at a real software company. It must be immediately runnable with no modifications needed beyond filling in .env values.
-
-FRONTEND UI QUALITY BAR — STRICTLY ENFORCED:
-UI must feel like a premium SaaS product (Stripe, Linear, Vercel level). If you generate boring UI, you have failed.
-
-✅ REQUIRED in every frontend component:
-- Generous spacing: padding-8, gap-6, py-16 for sections
-- Large headings: text-3xl to text-5xl for page titles
-- Hover effects on EVERY interactive element
-- Smooth transitions: className="... transition duration-200"
-- Card-based layouts with rounded-2xl and shadow-md
-- Avatar initials for user content
-- Proper empty states with SVG icons
-- Gradient hero sections on Home page
-- Color-coded status badges
-
-❌ STRICTLY FORBIDDEN — never generate these:
-- Plain vertical stack of inputs with no spacing
-- Small text (text-sm) for main content
-- No hover states on buttons or cards
-- Flat gray divs with no visual hierarchy
-- Bullet point lists as page features
-- Linking to /api/... URLs in the UI
-- No loading states or empty states
-- Plain white pages with no background color
+FRONTEND UI QUALITY BAR:
+✅ REQUIRED: gradient hero on Home, hover effects everywhere, loading spinners, empty states with SVG icons, avatar initials, card layouts with rounded-2xl
+❌ FORBIDDEN: bullet lists as features, /api/... links in UI, no hover states, flat pages, missing empty states
 """
+
 
 def build_file(file_info, blueprint, project_path, existing_files={}):
     """Builds a single file based on blueprint context."""
-    
+
     file_path = file_info["path"]
     file_description = file_info["description"]
     depends_on = file_info.get("depends_on", [])
@@ -549,13 +537,6 @@ def build_file(file_info, blueprint, project_path, existing_files={}):
         if dep in existing_files:
             dependency_context += f"\n\n--- {dep} ---\n{existing_files[dep]}"
 
-    # Query memory for similar past solutions
-    past_experience = query_experience(file_description)
-    memory_context = ""
-    if past_experience and past_experience[0]:
-        memory_context = "\nPAST SIMILAR CODE (use as reference):\n" + "\n".join(past_experience[0])
-
-    # Build the prompt
     user_prompt = f"""
 Project: {blueprint['description']}
 Stack: {blueprint['stack']}
@@ -568,10 +549,8 @@ Purpose: {file_description}
 Dependencies already written:
 {dependency_context if dependency_context else "None"}
 
-{memory_context}
-
 Write the COMPLETE, PRODUCTION-READY code for {file_path} now.
-Remember: No placeholders, no TODOs, no stubs. Real working code only.
+No placeholders, no TODOs, no stubs. Real working code only.
 """
 
     history = [
@@ -582,59 +561,90 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
     last_error = ""
     final_code = ""
 
-    # Use UI-specialized pipeline + more tokens for frontend files
     is_frontend = file_path.startswith("frontend/") and file_path.endswith((".js", ".jsx", ".css", ".html"))
     task_type = "ui" if is_frontend else "general"
     max_tokens = get_optimal_tokens(file_path)
 
     if is_frontend:
-        print(f"  🎨 Using UI pipeline with {max_tokens} tokens")
+        print(f"  🎨 UI pipeline — {max_tokens} tokens")
 
     for attempt in range(1, 4):
         if attempt > 1:
             print(f"  🔄 Retry attempt {attempt}...")
 
+        # ── Call LLM ──
         try:
             response = call_llm(history, max_tokens=max_tokens, task_type=task_type)
         except Exception as e:
             print(f"  ❌ All providers failed: {str(e)[:120]}")
-            return final_code
+            return final_code  # Return whatever we have (may be empty)
 
-        code = response.choices[0].message.content.strip()
+        # ── FIX 1: Safe extraction — no more NoneType.strip() crash ──
+        code = extract_code(response)
+        if code is None:
+            print(f"  ❌ Empty/invalid response from model")
+            history.append({"role": "user", "content": "Your previous response was empty or invalid. Output the complete working code now."})
+            continue
 
-        # Clean up backticks safely - replace known patterns directly
-        code = code.replace("```python", "").replace("```javascript", "").replace("```jsx", "").replace("```css", "").replace("```json", "").replace("```html", "").replace("```", "").strip()
+        # Clean up backticks
+        code = (code
+                .replace("```python", "").replace("```javascript", "")
+                .replace("```jsx", "").replace("```css", "")
+                .replace("```json", "").replace("```html", "")
+                .replace("```", "").strip())
 
-        # Write file to project
+        # ── FIX 2: Quality check — catch garbage output ──
+        if is_bad_code(code, file_path):
+            print(f"  ❌ Output too short or contains stubs (len={len(code)})")
+            history.append({"role": "assistant", "content": code})
+            history.append({"role": "user", "content": "Your output was incomplete or contained placeholder stubs. Return the FULL production-ready code."})
+            continue
+
+        # ── Write file to disk ──
         full_path = os.path.join(project_path, file_path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "w") as f:
             f.write(code)
 
-        # Only run syntax check for Python files
+        # ── Validate Python: syntax check ──
         if file_path.endswith(".py"):
             result = execute_python_code(f"import ast\nast.parse(open('{full_path}').read())\nprint('syntax ok')")
             if "syntax ok" in result["stdout"]:
                 print(f"  ✅ {file_path} built successfully")
                 final_code = code
-                add_experience(file_description, code, error=last_error)
                 return code
             else:
                 last_error = result["stderr"]
-                print(f"  ❌ Syntax error: {last_error[:100]}")
+                print(f"  ❌ Syntax error: {last_error[:120]}")
                 history.append({"role": "assistant", "content": code})
-                history.append({"role": "user", "content": f"Syntax error found:\n{last_error}\n\nFix the syntax error and output the complete corrected file."})
+                history.append({"role": "user", "content": f"Syntax error:\n{last_error}\n\nFix the error and return the complete corrected file."})
+                continue
+
+        # ── FIX 3: Validate JS/JSX: structural check ──
+        elif file_path.endswith((".js", ".jsx")):
+            valid, reason = validate_js_structure(code, file_path)
+            if not valid:
+                print(f"  ❌ JS validation failed: {reason}")
+                history.append({"role": "assistant", "content": code})
+                history.append({"role": "user", "content": f"The file failed validation: {reason}. Return the complete corrected file."})
+                continue
+            else:
+                print(f"  ✅ {file_path} built successfully")
+                final_code = code
+                return code
+
+        # ── Other files (CSS, HTML, JSON) — accept as-is ──
         else:
             print(f"  ✅ {file_path} built successfully")
             final_code = code
             return code
 
-    print(f"  ⚠️ Could not fix {file_path} after 3 attempts")
+    print(f"  ⚠️  Could not fix {file_path} after 3 attempts — using best available version")
     return final_code
 
 
 def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, on_file_done=None):
-    """Builds an entire project from a blueprint — parallel where possible."""
+    """Builds an entire project from a blueprint — sequential for stability on free tier."""
 
     project_name = blueprint["project_name"]
     project_path = os.path.join(output_dir, project_name)
@@ -647,18 +657,11 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
     failed_files = []
     files = blueprint["files"]
 
-    # ─────────────────────────────────────────────
-    # Split files into dependency waves:
-    # Wave 0: no dependencies (build in parallel)
-    # Wave 1: depends on wave 0 (build in parallel after wave 0)
-    # Wave 2: depends on wave 1, etc.
-    # ─────────────────────────────────────────────
     def get_waves(files):
-        """Group files into waves based on dependencies."""
+        """Group files into dependency waves."""
         completed = set()
         waves = []
         remaining = list(files)
-
         while remaining:
             wave = []
             still_remaining = []
@@ -669,7 +672,6 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
                 else:
                     still_remaining.append(f)
             if not wave:
-                # Circular deps or unresolvable — just add all remaining
                 wave = still_remaining
                 still_remaining = []
             for f in wave:
@@ -679,22 +681,22 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
         return waves
 
     waves = get_waves(files)
-    print(f"⚡ Building in {len(waves)} wave(s) — SEQUENTIAL mode (stable on free tier)")
+    print(f"⚡ Building {len(files)} files in {len(waves)} wave(s) — sequential mode")
 
     for wave_idx, wave in enumerate(waves):
         print(f"\n🌊 Wave {wave_idx + 1}/{len(waves)}: {len(wave)} file(s)")
 
-        # SEQUENTIAL — one file at a time to prevent rate limit bursts
-        # and reduce RAM usage on Render's 512MB free tier
         for file_info in wave:
             if on_file_start:
                 on_file_start(file_info["path"])
+
             code = build_file(
                 file_info=file_info,
                 blueprint=blueprint,
                 project_path=project_path,
                 existing_files=existing_files
             )
+
             if code:
                 existing_files[file_info["path"]] = code
                 if on_file_done:
@@ -703,30 +705,27 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
                 failed_files.append(file_info["path"])
                 if on_file_done:
                     on_file_done(file_info["path"], success=False)
+                print(f"  ⚠️  {file_info['path']} failed — dependent files may be affected")
 
-        # Pause between waves
+        # Brief pause between waves — lets rate limits recover slightly
         if wave_idx < len(waves) - 1:
-            time.sleep(3)
+            time.sleep(2)
 
-    # ─────────────────────────────────────────────
-    # PHASE 2: TEST + DEBUG LOOP
-    # ─────────────────────────────────────────────
+    # ── PHASE 2: TEST + DEBUG ──
     print(f"\n{'='*50}")
     print("🧪 RUNNING TESTER + DEBUGGER...")
     print(f"{'='*50}")
 
     try:
-        from agent.tester import run_tests, format_errors_for_log
+        from agent.tester import run_tests
         from agent.debugger import run_debug_loop
 
-        # Run full test → debug → retest loop (max 3 attempts)
         existing_files, final_test_result, attempts = run_debug_loop(
             files=existing_files,
             tester_fn=run_tests,
             max_retries=3
         )
 
-        # Write back any fixed files to disk
         for file_path, code in existing_files.items():
             full_path = os.path.join(project_path, file_path)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -739,18 +738,8 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
         print(f"\n⚠️  Tester/Debugger failed: {e} — continuing with unvalidated build")
 
     # Write requirements.txt
-    requirements = """flask
-flask-cors
-flask-sqlalchemy
-flask-jwt-extended
-flask-migrate
-sqlalchemy
-psycopg2-binary
-python-dotenv
-werkzeug
-"""
     with open(os.path.join(project_path, "requirements.txt"), "w") as f:
-        f.write(requirements)
+        f.write("flask\nflask-cors\nflask-sqlalchemy\nflask-jwt-extended\nflask-migrate\nsqlalchemy\npsycopg2-binary\npython-dotenv\nwerkzeug\n")
     print("\n📄 requirements.txt written")
 
     # Write README
@@ -764,70 +753,47 @@ werkzeug
 - Database: {blueprint['stack']['database']}
 
 ## Prerequisites
-- Python 3.9+
-- Node.js 16+
-- PostgreSQL
+- Python 3.9+, Node.js 16+, PostgreSQL
 
 ## Setup
 
 ### Backend
 ```bash
-cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: venv\\Scripts\\activate
 pip install -r requirements.txt
-cp .env.example .env      # Fill in your values
+cp .env.example .env
 flask db init && flask db migrate && flask db upgrade
-python app.py
+python -m backend.app
 ```
 
 ### Frontend
 ```bash
-cd frontend
-npm install
-cp .env.example .env      # Set REACT_APP_API_URL
-npm start
+cd frontend && npm install && npm start
 ```
 
 ## Environment Variables
-| Variable | Description | Example |
-|----------|-------------|---------|
-| DATABASE_URL | PostgreSQL connection string | postgresql://user:pass@localhost/dbname |
-| SECRET_KEY | Flask secret key | your-secret-key |
-| JWT_SECRET_KEY | JWT signing key | your-jwt-secret |
-| DEBUG | Debug mode | True |
-| FLASK_ENV | Flask environment | development |
-| REACT_APP_API_URL | Backend URL for React | http://localhost:5000 |
-
-## API Endpoints
+| Variable | Description |
+|----------|-------------|
+| DATABASE_URL | postgresql://user:pass@localhost/dbname |
+| SECRET_KEY | Flask secret key |
+| JWT_SECRET_KEY | JWT signing key |
+| REACT_APP_API_URL | http://localhost:5000 |
 """
-    for endpoint in blueprint.get("api_endpoints", []):
-        if isinstance(endpoint, dict):
-            auth = "🔒" if endpoint.get("auth_required") else "🔓"
-            readme += f"| {endpoint.get('method','GET')} | {endpoint.get('path','/')} | {endpoint.get('description','')} | {auth} |\n"
-
     with open(os.path.join(project_path, "README.md"), "w") as f:
         f.write(readme)
     print("📄 README.md written")
 
-    # Summary
     print(f"\n{'='*50}")
     print(f"✅ Project built: {len(existing_files)}/{len(files)} files")
     if failed_files:
-        print(f"⚠️  Failed files: {failed_files}")
+        print(f"⚠️  Failed: {failed_files}")
     print(f"📁 Location: {project_path}")
 
     return project_path, existing_files, failed_files
 
 
-# Test it
 if __name__ == "__main__":
     from agent.planner import generate_blueprint
-
-    blueprint = generate_blueprint(
-        "A simple e-commerce store where users can browse products, add to cart, and place orders"
-    )
-
+    blueprint = generate_blueprint("A simple e-commerce store where users can browse products, add to cart, and place orders")
     if blueprint:
         project_path, built, failed = build_project(blueprint)
-        print(f"\nBuilt files: {list(built.keys())}")
+        print(f"\nBuilt: {list(built.keys())}")
