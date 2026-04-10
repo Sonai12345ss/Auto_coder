@@ -1,6 +1,10 @@
 import os
 import time
 import json
+import random
+import threading
+from collections import defaultdict
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from groq import Groq
 from openai import OpenAI
@@ -14,6 +18,59 @@ def add_experience(desc, code, error=None): pass
 
 load_dotenv()
 
+# ─────────────────────────────────────────────
+# PROVIDER HEALTH TRACKER
+# Prevents wasting time on rate-limited providers
+# ─────────────────────────────────────────────
+class ProviderHealthTracker:
+    def __init__(self):
+        self.failures = defaultdict(int)  # Track consecutive failures
+        self.last_success = defaultdict(lambda: datetime.now())
+        self.rate_limited_until = defaultdict(lambda: datetime.min)
+        self.lock = threading.Lock()
+    
+    def mark_rate_limited(self, provider_name, cooldown_seconds=60):
+        """Mark provider as rate-limited for cooldown period"""
+        with self.lock:
+            self.rate_limited_until[provider_name] = datetime.now() + timedelta(seconds=cooldown_seconds)
+            self.failures[provider_name] += 1
+    
+    def mark_success(self, provider_name):
+        """Reset failure count on success"""
+        with self.lock:
+            self.failures[provider_name] = 0
+            self.last_success[provider_name] = datetime.now()
+    
+    def is_available(self, provider_name):
+        """Check if provider is likely available"""
+        with self.lock:
+            # Skip if recently rate-limited
+            if datetime.now() < self.rate_limited_until[provider_name]:
+                return False
+            # Skip if too many consecutive failures
+            if self.failures[provider_name] >= 3:
+                return False
+            return True
+    
+    def get_best_providers(self, provider_list, max_attempts=5):
+        """Return top N available providers"""
+        available = [p for p in provider_list if self.is_available(p['name'])]
+        
+        # If less than 3 available, reset some failed providers
+        if len(available) < 3:
+            with self.lock:
+                # Reset providers that failed more than 2 minutes ago
+                for name in self.failures.keys():
+                    if (datetime.now() - self.last_success[name]).total_seconds() > 120:
+                        self.failures[name] = 0
+                        self.rate_limited_until[name] = datetime.min
+            available = [p for p in provider_list if self.is_available(p['name'])]
+        
+        return available[:max_attempts]
+
+# Global tracker
+provider_health = ProviderHealthTracker()
+
 # Pre-initialize all clients once at startup (faster than creating per call)
 groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 groq2   = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
@@ -24,36 +81,31 @@ gemini3 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/open
 openrouter  = OpenAI(base_url="https://openrouter.ai/api/v1",      api_key=os.environ.get("OPENROUTER_API_KEY", ""))
 doubleword  = OpenAI(base_url="https://api.doubleword.ai/v1",       api_key=os.environ.get("DOUBLEWORD_API_KEY", ""))
 
-# 3 Groq + 3x2 Gemini + 3 OpenRouter + 2 Doubleword (paid fallback) = 14 providers
+# OPTIMIZED: Reordered by speed + quota (fastest/highest quota first)
 PROVIDERS = [
-    # Groq — llama-3.3-70b (3 keys)
-    {"name": "Groq-1 / llama-3.3-70b",       "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-2 / llama-3.3-70b",       "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-3 / llama-3.3-70b",       "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Groq — llama3-groq-70b (3 keys, separate rate limit pool)
-    {"name": "Groq-1 / llama3-70b",          "call": lambda msgs, mt: groq1.chat.completions.create(model="llama3-groq-70b-8192-tool-use-preview", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-2 / llama3-70b",          "call": lambda msgs, mt: groq2.chat.completions.create(model="llama3-groq-70b-8192-tool-use-preview", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-3 / llama3-70b",          "call": lambda msgs, mt: groq3.chat.completions.create(model="llama3-groq-70b-8192-tool-use-preview", messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Groq — llama-3.1-8b (3 keys, separate rate limit pool)
-    {"name": "Groq-1 / llama-3.1-8b",        "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-2 / llama-3.1-8b",        "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-3 / llama-3.1-8b",        "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Gemini 2.0 Flash (3 keys)
+    # Gemini 2.0 Flash FIRST — highest free tier quota (1500 RPD)
     {"name": "Gemini-1 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Gemini 2.5 Flash (3 keys)
+    # Groq llama-3.3-70b SECOND — fast but lower quota (30 RPM per key)
+    {"name": "Groq-1 / llama-3.3-70b",       "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-2 / llama-3.3-70b",       "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-3 / llama-3.3-70b",       "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
+    # OpenRouter free models THIRD — backup
+    {"name": "OpenRouter / llama-3.3-70b",   "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "OpenRouter / gemma-3-27b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
+    # Gemini 2.5 Flash — moderate quota (50 RPM)
     {"name": "Gemini-1 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Gemini 2.5 Pro (3 keys — best free model for UI quality)
+    # Groq smaller models — higher quota but lower quality
+    {"name": "Groq-1 / llama-3.1-8b",        "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-2 / llama-3.1-8b",        "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Groq-3 / llama-3.1-8b",        "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
+    # Gemini 2.5 Pro — best quality but lowest quota (2 RPM on free tier)
     {"name": "Gemini-1 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
-    # OpenRouter free models
-    {"name": "OpenRouter / llama-3.3-70b",   "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "OpenRouter / gemma-3-27b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "OpenRouter / gemma-3-12b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-12b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
     # Paid fallback — only used when all free providers fail
     {"name": "Doubleword / Qwen3.5-35B",     "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-35B-A3B-FP8",   messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Doubleword / Qwen3.5-397B",    "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.15, max_tokens=mt)},
@@ -79,31 +131,54 @@ UI_PROVIDERS = [
 ]
 
 def call_llm(messages, max_tokens=4096, task_type="general"):
-    """Try each provider in order. Uses UI_PROVIDERS for frontend files."""
+    """Try best available providers only (max 5 attempts instead of 23)"""
     provider_list = UI_PROVIDERS if task_type == "ui" else PROVIDERS
+    
+    # Get only healthy providers (max 5 attempts)
+    candidates = provider_health.get_best_providers(provider_list, max_attempts=5)
+    
+    if not candidates:
+        print("  ⚠️  All providers exhausted, waiting 30s for cooldown...")
+        time.sleep(30)
+        candidates = provider_list[:5]  # Try first 5 as fallback
+    
     last_error = None
-    for attempt, provider in enumerate(provider_list):
+    for attempt, provider in enumerate(candidates):
         try:
             print(f"  🤖 Using {provider['name']}...")
-            return provider["call"](messages, max_tokens)
+            response = provider["call"](messages, max_tokens)
+            
+            # Mark success
+            provider_health.mark_success(provider['name'])
+            return response
+            
         except Exception as e:
             err = str(e).lower()
-            # Always continue to next provider — never crash the build
-            if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota", "503", "402", "temporarily", "overloaded", "upstream"]):
-                wait = min(2 ** (attempt % 4), 16)
-                print(f"  ⚠️  {provider['name']} rate limited, waiting {wait}s then trying next...")
+            
+            # Rate limit detected
+            if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota", "503", "overloaded", "upstream", "temporarily"]):
+                # Longer cooldown for Gemini (they have strict quotas)
+                cooldown = 90 if "gemini" in provider['name'].lower() else 60
+                provider_health.mark_rate_limited(provider['name'], cooldown_seconds=cooldown)
+                print(f"  ⚠️  {provider['name']} rate limited (cooldown {cooldown}s), trying next...")
                 last_error = e
-                time.sleep(wait)
+                time.sleep(0.5)  # Short pause before next provider
                 continue
+            
+            # Model unavailable
             elif any(x in err for x in ["decommission", "deprecated", "no longer supported", "400", "404", "not found", "invalid model"]):
+                provider_health.mark_rate_limited(provider['name'], cooldown_seconds=300)
                 print(f"  ⚠️  {provider['name']} model unavailable, trying next...")
                 last_error = e
                 continue
+            
+            # Other error
             else:
                 print(f"  ⚠️  {provider['name']} error: {str(e)[:80]}, trying next...")
                 last_error = e
                 continue
-    raise Exception(f"All providers failed. Last error: {last_error}")
+    
+    raise Exception(f"All available providers failed. Last error: {last_error}")
 
 BUILDER_PROMPT = """
 You are a senior full stack engineer with 10+ years of experience. You write production-grade code that is secure, maintainable, and complete. Your job is to write a single file as part of a larger project.
@@ -520,6 +595,12 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
     for attempt in range(1, 4):
         if attempt > 1:
             print(f"  🔄 Retry attempt {attempt}...")
+            time.sleep(2)  # Wait before retry
+
+        # Add jitter to prevent thundering herd in parallel builds
+        if existing_files and attempt == 1:  # Not first file in wave
+            jitter = random.uniform(0.5, 2.0)
+            time.sleep(jitter)
 
         try:
             response = call_llm(history, max_tokens=max_tokens, task_type=task_type)
@@ -632,8 +713,7 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
                     on_file_done(file_info["path"], success=False)
         else:
             # Multiple files — build in parallel with ThreadPoolExecutor
-            # Use max 4 workers to avoid hammering the LLM API
-            # Max 2 workers on free tier (512MB RAM limit)
+            # OPTIMIZED: Use 2 workers with provider health tracking
             max_workers = min(2, len(wave))
             wave_results = {}
 
@@ -675,9 +755,9 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
             # Merge wave results into existing_files
             existing_files.update(wave_results)
 
-        # Small pause between waves (not between files) to be nice to APIs
+        # OPTIMIZED: Longer pause between waves to let rate limits reset
         if wave_idx < len(waves) - 1:
-            time.sleep(2)
+            time.sleep(5)
 
     # ─────────────────────────────────────────────
     # PHASE 2: TEST + DEBUG LOOP
