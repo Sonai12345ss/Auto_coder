@@ -1,7 +1,6 @@
 import os
 import time
 import json
-import random
 import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -18,78 +17,54 @@ def add_experience(desc, code, error=None): pass
 
 load_dotenv()
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 🔧 FIX 1: GLOBAL RATE LIMITING
-# Prevents burst API requests that trigger 429 errors
-# ═══════════════════════════════════════════════════════════════════════════
-RATE_LIMIT_LOCK = threading.Lock()
-LAST_REQUEST_TIME = 0
-MIN_INTERVAL = 2.5  # seconds between API calls (global across all threads)
+# ═══════════════════════════════════════════════════════════════
+# GLOBAL RATE LIMITER — prevents burst API requests hitting 429
+# ═══════════════════════════════════════════════════════════════
+_RATE_LIMIT_LOCK = threading.Lock()
+_LAST_REQUEST_TIME = 0
+_MIN_INTERVAL = 2.0  # seconds between API calls globally
 
-def safe_api_call(func, *args, **kwargs):
-    """Wrap any API call with global rate limiting"""
-    global LAST_REQUEST_TIME
-    
-    with RATE_LIMIT_LOCK:
+def _throttle():
+    global _LAST_REQUEST_TIME
+    with _RATE_LIMIT_LOCK:
         now = time.time()
-        wait = MIN_INTERVAL - (now - LAST_REQUEST_TIME)
-        
+        wait = _MIN_INTERVAL - (now - _LAST_REQUEST_TIME)
         if wait > 0:
             time.sleep(wait)
-        
-        LAST_REQUEST_TIME = time.time()
-    
-    return func(*args, **kwargs)
+        _LAST_REQUEST_TIME = time.time()
 
-# ═══════════════════════════════════════════════════════════════════════════
-# PROVIDER HEALTH TRACKER
-# Prevents wasting time on rate-limited providers
-# ═══════════════════════════════════════════════════════════════════════════
-class ProviderHealthTracker:
+# ═══════════════════════════════════════════════════════════════
+# PROVIDER HEALTH TRACKER — skip rate-limited providers
+# ═══════════════════════════════════════════════════════════════
+class ProviderHealth:
     def __init__(self):
         self.failures = defaultdict(int)
-        self.last_success = defaultdict(lambda: datetime.now())
-        self.rate_limited_until = defaultdict(lambda: datetime.min)
-        self.lock = threading.Lock()
-    
-    def mark_rate_limited(self, provider_name, cooldown_seconds=60):
-        """Mark provider as rate-limited for cooldown period"""
-        with self.lock:
-            self.rate_limited_until[provider_name] = datetime.now() + timedelta(seconds=cooldown_seconds)
-            self.failures[provider_name] += 1
-    
-    def mark_success(self, provider_name):
-        """Reset failure count on success"""
-        with self.lock:
-            self.failures[provider_name] = 0
-            self.last_success[provider_name] = datetime.now()
-    
-    def is_available(self, provider_name):
-        """Check if provider is likely available"""
-        with self.lock:
-            if datetime.now() < self.rate_limited_until[provider_name]:
-                return False
-            if self.failures[provider_name] >= 3:
-                return False
-            return True
-    
-    def get_best_providers(self, provider_list, max_attempts=5):
-        """Return top N available providers"""
-        available = [p for p in provider_list if self.is_available(p['name'])]
-        
-        if len(available) < 3:
-            with self.lock:
-                for name in self.failures.keys():
-                    if (datetime.now() - self.last_success[name]).total_seconds() > 120:
-                        self.failures[name] = 0
-                        self.rate_limited_until[name] = datetime.min
-            available = [p for p in provider_list if self.is_available(p['name'])]
-        
-        return available[:max_attempts]
+        self.blocked_until = defaultdict(lambda: datetime.min)
+        self._lock = threading.Lock()
 
-provider_health = ProviderHealthTracker()
+    def block(self, name, seconds=90):
+        with self._lock:
+            self.failures[name] += 1
+            self.blocked_until[name] = datetime.now() + timedelta(seconds=seconds)
 
-# Pre-initialize all clients once at startup
+    def ok(self, name):
+        with self._lock:
+            self.failures[name] = 0
+            self.blocked_until[name] = datetime.min
+
+    def is_available(self, name):
+        with self._lock:
+            return datetime.now() >= self.blocked_until[name]
+
+    def reset_all(self):
+        """Reset all blocks — called when all providers are exhausted"""
+        with self._lock:
+            self.failures.clear()
+            self.blocked_until.clear()
+
+_health = ProviderHealth()
+
+# Pre-initialize all clients once at startup (faster than creating per call)
 groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 groq2   = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
 groq3   = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
@@ -99,27 +74,28 @@ gemini3 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/open
 openrouter  = OpenAI(base_url="https://openrouter.ai/api/v1",      api_key=os.environ.get("OPENROUTER_API_KEY", ""))
 doubleword  = OpenAI(base_url="https://api.doubleword.ai/v1",       api_key=os.environ.get("DOUBLEWORD_API_KEY", ""))
 
-# OPTIMIZED: Reordered by speed + quota (fastest/highest quota first)
+# OPTIMIZED PROVIDER ORDER: highest free quota first
+# gemini-2.0-flash: 1500 RPD free | groq: 14400 RPD | 2.5-flash: 1000 RPD | 2.5-pro: 50 RPD
 PROVIDERS = [
-    # Gemini 2.0 Flash FIRST — highest free tier quota (1500 RPD)
+    # Gemini 2.0 Flash FIRST — highest free daily quota (1500 req/day × 3 keys)
     {"name": "Gemini-1 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Groq llama-3.3-70b SECOND — fast but lower quota (30 RPM per key)
+    # Groq llama-3.3-70b SECOND — fast, generous free tier
     {"name": "Groq-1 / llama-3.3-70b",       "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-2 / llama-3.3-70b",       "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-3 / llama-3.3-70b",       "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
-    # OpenRouter free models THIRD — backup
-    {"name": "OpenRouter / llama-3.3-70b",   "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "OpenRouter / gemma-3-27b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Gemini 2.5 Flash — moderate quota (50 RPM)
-    {"name": "Gemini-1 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Groq smaller models — higher quota but lower quality
+    # Groq llama-3.1-8b THIRD — highest Groq RPM limit
     {"name": "Groq-1 / llama-3.1-8b",        "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-2 / llama-3.1-8b",        "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-3 / llama-3.1-8b",        "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
+    # OpenRouter free models FOURTH
+    {"name": "OpenRouter / llama-3.3-70b",   "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "OpenRouter / gemma-3-27b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
+    # Gemini 2.5 Flash — good quality, moderate quota
+    {"name": "Gemini-1 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     # Gemini 2.5 Pro — best quality but lowest quota (2 RPM on free tier)
     {"name": "Gemini-1 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
@@ -129,7 +105,7 @@ PROVIDERS = [
     {"name": "Doubleword / Qwen3.5-397B",    "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.15, max_tokens=mt)},
 ]
 
-# UI-SPECIALIZED PROVIDERS
+# UI pipeline — flash first (higher RPM), pro as fallback
 UI_PROVIDERS = [
     {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
@@ -143,78 +119,64 @@ UI_PROVIDERS = [
     {"name": "Doubleword / Qwen3.5-397B",   "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.2, max_tokens=mt)},
 ]
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 🔧 FIX 3: TOKEN OPTIMIZATION
-# Dynamic token allocation based on file type
-# ═══════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────
+# TOKEN OPTIMIZER — right-size tokens per file type
+# ─────────────────────────────────────────────
 def get_optimal_tokens(file_path):
-    """Return optimal token count based on file complexity"""
-    if "index.html" in file_path or "package.json" in file_path:
-        return 800  # Simple files
-    elif "config.py" in file_path or ".env.example" in file_path:
-        return 600  # Minimal files
-    elif file_path.endswith((".js", ".jsx")) and "components/" in file_path:
-        return 1500  # React components (need styling)
-    elif file_path.endswith(".py") and "routes.py" in file_path:
-        return 1200  # API routes
+    if file_path.endswith(("package.json", "index.html", ".env.example")):
+        return 800
+    elif file_path.endswith(("config.py", "index.css")):
+        return 600
+    elif "components/" in file_path and file_path.endswith((".js", ".jsx")):
+        return 1800  # React components need styling room
+    elif "routes.py" in file_path:
+        return 1500  # API routes can be long
     elif file_path.endswith(".py"):
-        return 1000  # Other Python files
-    elif file_path.endswith((".css", ".json")):
-        return 800  # Styling and config
+        return 1200
+    elif file_path.endswith(("App.js", "api.js", "index.js")):
+        return 1200
     else:
-        return 1000  # Default
+        return 1000
 
 def call_llm(messages, max_tokens=4096, task_type="general"):
-    """Try best available providers with global rate limiting"""
+    """Try providers in order, skipping rate-limited ones. Uses global throttle."""
     provider_list = UI_PROVIDERS if task_type == "ui" else PROVIDERS
-    
-    # Get only healthy providers (max 5 attempts)
-    candidates = provider_health.get_best_providers(provider_list, max_attempts=5)
-    
-    if not candidates:
-        print("  ⚠️  All providers exhausted, waiting 30s for cooldown...")
-        time.sleep(30)
-        candidates = provider_list[:5]
-    
     last_error = None
-    for attempt, provider in enumerate(candidates):
+
+    # Filter to available providers, fall back to all if everything blocked
+    available = [p for p in provider_list if _health.is_available(p['name'])]
+    if not available:
+        print("  ⚠️  All providers in cooldown — resetting and retrying...")
+        _health.reset_all()
+        available = provider_list
+
+    for provider in available:
         try:
             print(f"  🤖 Using {provider['name']}...")
-            
-            # 🔧 FIX 1: Apply global rate limiting
-            response = safe_api_call(provider["call"], messages, max_tokens)
-            
-            # Mark success
-            provider_health.mark_success(provider['name'])
+            _throttle()  # Global rate limiter — prevents burst 429s
+            response = provider["call"](messages, max_tokens)
+            _health.ok(provider['name'])
             return response
-            
+
         except Exception as e:
             err = str(e).lower()
-            
-            # Rate limit detected
-            if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota", "503", "overloaded", "upstream", "temporarily"]):
-                cooldown = 90 if "gemini" in provider['name'].lower() else 60
-                provider_health.mark_rate_limited(provider['name'], cooldown_seconds=cooldown)
-                print(f"  ⚠️  {provider['name']} rate limited (cooldown {cooldown}s), trying next...")
-                last_error = e
-                # 🔧 FIX 4: Extended wait on rate limit
-                time.sleep(10)
-                continue
-            
-            # Model unavailable
-            elif any(x in err for x in ["decommission", "deprecated", "no longer supported", "400", "404", "not found", "invalid model"]):
-                provider_health.mark_rate_limited(provider['name'], cooldown_seconds=300)
-                print(f"  ⚠️  {provider['name']} model unavailable, trying next...")
+            if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota", "503", "402", "temporarily", "overloaded", "upstream"]):
+                cooldown = 120 if "gemini" in provider['name'].lower() else 60
+                _health.block(provider['name'], seconds=cooldown)
+                print(f"  ⚠️  {provider['name']} rate limited (cooldown {cooldown}s), skipping...")
                 last_error = e
                 continue
-            
-            # Other error
+            elif any(x in err for x in ["decommission", "deprecated", "no longer supported", "invalid model"]):
+                _health.block(provider['name'], seconds=600)
+                print(f"  ⚠️  {provider['name']} model unavailable, skipping...")
+                last_error = e
+                continue
             else:
                 print(f"  ⚠️  {provider['name']} error: {str(e)[:80]}, trying next...")
                 last_error = e
                 continue
-    
-    raise Exception(f"All available providers failed. Last error: {last_error}")
+
+    raise Exception(f"All providers failed. Last error: {last_error}")
 
 BUILDER_PROMPT = """
 You are a senior full stack engineer with 10+ years of experience. You write production-grade code that is secure, maintainable, and complete. Your job is to write a single file as part of a larger project.
@@ -620,7 +582,7 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
     last_error = ""
     final_code = ""
 
-    # 🔧 FIX 3: Use optimized token allocation
+    # Use UI-specialized pipeline + more tokens for frontend files
     is_frontend = file_path.startswith("frontend/") and file_path.endswith((".js", ".jsx", ".css", ".html"))
     task_type = "ui" if is_frontend else "general"
     max_tokens = get_optimal_tokens(file_path)
@@ -628,17 +590,19 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
     if is_frontend:
         print(f"  🎨 Using UI pipeline with {max_tokens} tokens")
 
-    # 🔧 FIX 4: Reduced retry attempts (1 attempt only)
-    for attempt in range(1, 2):  # Only 1 attempt
+    for attempt in range(1, 4):
+        if attempt > 1:
+            print(f"  🔄 Retry attempt {attempt}...")
+
         try:
             response = call_llm(history, max_tokens=max_tokens, task_type=task_type)
         except Exception as e:
-            print(f"  ❌ Provider failed: {str(e)[:120]}")
+            print(f"  ❌ All providers failed: {str(e)[:120]}")
             return final_code
 
         code = response.choices[0].message.content.strip()
 
-        # Clean up backticks safely
+        # Clean up backticks safely - replace known patterns directly
         code = code.replace("```python", "").replace("```javascript", "").replace("```jsx", "").replace("```css", "").replace("```json", "").replace("```html", "").replace("```", "").strip()
 
         # Write file to project
@@ -658,19 +622,19 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
             else:
                 last_error = result["stderr"]
                 print(f"  ❌ Syntax error: {last_error[:100]}")
-                # Don't retry — just return what we have
-                final_code = code
-                return code
+                history.append({"role": "assistant", "content": code})
+                history.append({"role": "user", "content": f"Syntax error found:\n{last_error}\n\nFix the syntax error and output the complete corrected file."})
         else:
             print(f"  ✅ {file_path} built successfully")
             final_code = code
             return code
 
+    print(f"  ⚠️ Could not fix {file_path} after 3 attempts")
     return final_code
 
 
 def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, on_file_done=None):
-    """Builds an entire project from a blueprint — SEQUENTIAL execution for stability."""
+    """Builds an entire project from a blueprint — parallel where possible."""
 
     project_name = blueprint["project_name"]
     project_path = os.path.join(output_dir, project_name)
@@ -684,7 +648,10 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
     files = blueprint["files"]
 
     # ─────────────────────────────────────────────
-    # Split files into dependency waves
+    # Split files into dependency waves:
+    # Wave 0: no dependencies (build in parallel)
+    # Wave 1: depends on wave 0 (build in parallel after wave 0)
+    # Wave 2: depends on wave 1, etc.
     # ─────────────────────────────────────────────
     def get_waves(files):
         """Group files into waves based on dependencies."""
@@ -702,6 +669,7 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
                 else:
                     still_remaining.append(f)
             if not wave:
+                # Circular deps or unresolvable — just add all remaining
                 wave = still_remaining
                 still_remaining = []
             for f in wave:
@@ -711,23 +679,22 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
         return waves
 
     waves = get_waves(files)
-    print(f"🔨 Building in {len(waves)} wave(s) — SEQUENTIAL mode for stability")
+    print(f"⚡ Building in {len(waves)} wave(s) — SEQUENTIAL mode (stable on free tier)")
 
     for wave_idx, wave in enumerate(waves):
         print(f"\n🌊 Wave {wave_idx + 1}/{len(waves)}: {len(wave)} file(s)")
 
-        # 🔧 FIX 2: SEQUENTIAL EXECUTION (max_workers = 1)
+        # SEQUENTIAL — one file at a time to prevent rate limit bursts
+        # and reduce RAM usage on Render's 512MB free tier
         for file_info in wave:
             if on_file_start:
                 on_file_start(file_info["path"])
-            
             code = build_file(
                 file_info=file_info,
                 blueprint=blueprint,
                 project_path=project_path,
                 existing_files=existing_files
             )
-            
             if code:
                 existing_files[file_info["path"]] = code
                 if on_file_done:
@@ -752,12 +719,14 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
         from agent.tester import run_tests, format_errors_for_log
         from agent.debugger import run_debug_loop
 
+        # Run full test → debug → retest loop (max 3 attempts)
         existing_files, final_test_result, attempts = run_debug_loop(
             files=existing_files,
             tester_fn=run_tests,
             max_retries=3
         )
 
+        # Write back any fixed files to disk
         for file_path, code in existing_files.items():
             full_path = os.path.join(project_path, file_path)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
