@@ -326,6 +326,7 @@ def generate_blueprint(project_description):
             "frontend/src/components/Routing.js",
             "frontend/src/components/Router.js",
             "frontend/src/components/Routes.js",
+    "frontend/src/components/Protected.js",
             "frontend/src/Routing.js",
             "frontend/src/Router.js",
         }

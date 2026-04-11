@@ -36,13 +36,11 @@ def test_python_imports(file_path, code):
                 "line": i,
             })
 
-    # ── NEW: Check routes.py uses create_access_token but doesn't import it ──
+    # Check routes.py uses create_access_token but doesn't import it
     if "routes.py" in file_path and "create_access_token" in code:
-        # Find the flask_jwt_extended import line
-        jwt_import_match = re.search(r"from flask_jwt_extended import ([^\n]+)", code)
-        if jwt_import_match:
-            imported_names = jwt_import_match.group(1)
-            if "create_access_token" not in imported_names:
+        jwt_match = re.search(r"from flask_jwt_extended import ([^\n]+)", code)
+        if jwt_match:
+            if "create_access_token" not in jwt_match.group(1):
                 errors.append({
                     "file": file_path,
                     "type": "missing_jwt_import",
@@ -50,19 +48,12 @@ def test_python_imports(file_path, code):
                     "line": None,
                 })
         else:
-            # No flask_jwt_extended import at all
             errors.append({
                 "file": file_path,
                 "type": "missing_jwt_import",
                 "message": "routes.py uses create_access_token but has no flask_jwt_extended import",
                 "line": None,
             })
-
-    # ── NEW: Check app.py imports from backend package correctly ──
-    if "app.py" in file_path:
-        if "from backend import" in code or "from backend." in code:
-            # backend/__init__.py must exist — flagged at cross-file level
-            pass
 
     return errors
 
@@ -82,13 +73,13 @@ def test_js_syntax(file_path, code):
                 "line": i,
             })
 
-    # Check for ReactDOM.render (React 17 API, broken in React 18)
+    # Check for ReactDOM.render (React 17 API)
     for i, line in enumerate(lines, 1):
         if "ReactDOM.render(" in line:
             errors.append({
                 "file": file_path,
                 "type": "react17_api",
-                "message": f"ReactDOM.render() is deprecated. Use ReactDOM.createRoot() instead. Line {i}: {line.strip()}",
+                "message": f"ReactDOM.render() is deprecated in React 18. Use createRoot. Line {i}: {line.strip()}",
                 "line": i,
             })
 
@@ -97,7 +88,7 @@ def test_js_syntax(file_path, code):
         errors.append({
             "file": file_path,
             "type": "double_router",
-            "message": "index.js wraps App in BrowserRouter — App.js already has one. Remove it from index.js.",
+            "message": "index.js wraps App in BrowserRouter — App.js already has one.",
             "line": None,
         })
 
@@ -106,26 +97,25 @@ def test_js_syntax(file_path, code):
     for match in effect_matches:
         snippet = code[match.end():match.end()+300]
         if re.search(r"\}\s*\)\s*;?\s*\n", snippet):
-            dep_check = re.search(r"\}\s*,\s*\[", snippet)
-            if not dep_check:
+            if not re.search(r"\}\s*,\s*\[", snippet):
                 line_num = code[:match.start()].count("\n") + 1
                 errors.append({
                     "file": file_path,
                     "type": "missing_deps_array",
-                    "message": f"useEffect at line {line_num} is missing a dependency array [] — causes infinite re-renders.",
+                    "message": f"useEffect at line {line_num} is missing a dependency array [].",
                     "line": line_num,
                 })
 
     # Check for unsafe error.response access
     for i, line in enumerate(lines, 1):
-        if "error.response.status" in line or "error.response.data" in line:
-            if "error.response?." not in line:
-                errors.append({
-                    "file": file_path,
-                    "type": "unsafe_error_access",
-                    "message": f"Unsafe error.response access (crashes if network fails). Use error.response?.status instead. Line {i}: {line.strip()}",
-                    "line": i,
-                })
+        if ("error.response.status" in line or "error.response.data" in line) and \
+           "error.response?." not in line:
+            errors.append({
+                "file": file_path,
+                "type": "unsafe_error_access",
+                "message": f"Unsafe error.response access. Use error.response?.status instead. Line {i}: {line.strip()}",
+                "line": i,
+            })
 
     # ── NEW: Critical App.js export validation ──
     if "App.js" in file_path and "components/" not in file_path:
@@ -133,21 +123,21 @@ def test_js_syntax(file_path, code):
             errors.append({
                 "file": file_path,
                 "type": "critical_missing_export",
-                "message": "App.js missing 'export default' — React will not render anything.",
+                "message": "App.js missing 'export default' — React will not render.",
                 "line": None,
             })
         if "function App" not in code and "const App" not in code and "App =" not in code:
             errors.append({
                 "file": file_path,
                 "type": "critical_missing_component",
-                "message": "App.js missing App component definition (function App or const App).",
+                "message": "App.js missing App component definition.",
                 "line": None,
             })
         if "BrowserRouter" not in code and "Routes" not in code:
             errors.append({
                 "file": file_path,
                 "type": "critical_missing_router",
-                "message": "App.js missing routing — no BrowserRouter or Routes found.",
+                "message": "App.js missing routing (BrowserRouter/Routes).",
                 "line": None,
             })
 
@@ -161,6 +151,23 @@ def test_js_syntax(file_path, code):
                 "line": None,
             })
 
+    # ── NEW: Raw fetch() instead of api.js functions ──
+    # Catches components that bypass the JWT interceptor by using raw fetch
+    if "components/" in file_path and file_path.endswith(".js"):
+        if "fetch(" in code:
+            # Check if fetch is calling an /api/... endpoint directly
+            fetch_api_calls = re.findall(r"fetch\s*\(['\"]\/api\/[^'\"]+['\"]", code)
+            if fetch_api_calls:
+                # And it's not importing from api.js
+                has_api_import = "from '../api'" in code or "from '../../api'" in code
+                if not has_api_import:
+                    errors.append({
+                        "file": file_path,
+                        "type": "raw_fetch_instead_of_api",
+                        "message": f"Component calls {fetch_api_calls[0]} using raw fetch() instead of importing from api.js. JWT token won't be sent.",
+                        "line": None,
+                    })
+
     return errors
 
 def test_package_json(file_path, code):
@@ -168,8 +175,7 @@ def test_package_json(file_path, code):
     errors = []
     try:
         pkg = json.loads(code)
-        required = ["name", "version", "scripts", "dependencies"]
-        for field in required:
+        for field in ["name", "version", "scripts", "dependencies"]:
             if field not in pkg:
                 errors.append({
                     "file": file_path,
@@ -178,9 +184,8 @@ def test_package_json(file_path, code):
                     "line": None,
                 })
         if "dependencies" in pkg:
-            deps = pkg["dependencies"]
             for req in ["react", "react-dom", "react-router-dom", "axios"]:
-                if req not in deps:
+                if req not in pkg["dependencies"]:
                     errors.append({
                         "file": file_path,
                         "type": "missing_dependency",
@@ -206,8 +211,7 @@ def test_package_json(file_path, code):
 def test_env_example(file_path, code):
     """Check .env.example has required variables."""
     errors = []
-    required_vars = ["DATABASE_URL", "SECRET_KEY", "JWT_SECRET_KEY"]
-    for var in required_vars:
+    for var in ["DATABASE_URL", "SECRET_KEY", "JWT_SECRET_KEY"]:
         if var not in code:
             errors.append({
                 "file": file_path,
@@ -225,24 +229,20 @@ def test_html_file(file_path, code):
         errors.append({
             "file": file_path,
             "type": "missing_root_div",
-            "message": "public/index.html missing <div id=\"root\"></div> — React can't mount.",
+            "message": "public/index.html missing <div id=\"root\"></div>",
             "line": None,
         })
 
-    # ── NEW: Check Tailwind CDN is a <script> tag, not a <link> tag ──
+    # Check Tailwind CDN — must be <script> not <link>
     if "cdn.tailwindcss.com" in code:
-        # It's there — but is it a link tag instead of script tag?
-        if '<link' in code and 'tailwindcss' in code and 'tailwind.css' not in code:
-            # Check if it's being used as a link stylesheet (wrong)
-            if re.search(r'<link[^>]*tailwindcss[^>]*>', code):
-                errors.append({
-                    "file": file_path,
-                    "type": "wrong_tailwind_tag",
-                    "message": "Tailwind CDN must use <script src> not <link href>. Replace: <link rel=\"stylesheet\" href=\"https://cdn.tailwindcss.com\"> with <script src=\"https://cdn.tailwindcss.com\"></script>",
-                    "line": None,
-                })
+        if re.search(r'<link[^>]*tailwindcss[^>]*>', code):
+            errors.append({
+                "file": file_path,
+                "type": "wrong_tailwind_tag",
+                "message": "Tailwind CDN must use <script src> not <link href>.",
+                "line": None,
+            })
     else:
-        # Tailwind CDN not present at all
         errors.append({
             "file": file_path,
             "type": "missing_tailwind",
@@ -257,14 +257,14 @@ def check_cross_file_consistency(files):
     errors = []
     file_paths = set(files.keys())
 
-    # ── NEW: Check backend/__init__.py exists when app.py imports from backend ──
+    # Check backend/__init__.py exists when app.py imports from backend
     app_py = files.get("backend/app.py", "")
     if app_py and ("from backend import" in app_py or "from backend." in app_py):
         if "backend/__init__.py" not in file_paths:
             errors.append({
                 "file": "backend/__init__.py",
                 "type": "missing_init_file",
-                "message": "backend/app.py uses 'from backend import db, jwt' but backend/__init__.py is missing. Flask won't start.",
+                "message": "backend/app.py uses 'from backend import' but backend/__init__.py is missing.",
                 "line": None,
             })
 
@@ -272,10 +272,9 @@ def check_cross_file_consistency(files):
     component_names = set()
     for path in file_paths:
         if path.startswith("frontend/src/") and path.endswith(".js"):
-            name = os.path.basename(path).replace(".js", "")
-            component_names.add(name)
+            component_names.add(os.path.basename(path).replace(".js", ""))
 
-    # Check each JS file's imports reference things that exist
+    # Check each JS file's imports
     for path, code in files.items():
         if not (path.endswith(".js") or path.endswith(".jsx")):
             continue
@@ -303,12 +302,7 @@ def check_cross_file_consistency(files):
 def run_tests(files):
     """
     Main entry point. Takes a dict of {file_path: code_string}.
-    Returns:
-        {
-            "passed": bool,
-            "errors": [...],
-            "summary": "X errors found in Y files"
-        }
+    Returns: {"passed": bool, "errors": [...], "summary": "..."}
     """
     all_errors = []
 
@@ -317,7 +311,7 @@ def run_tests(files):
             all_errors.append({
                 "file": file_path,
                 "type": "empty_file",
-                "message": "File is empty — builder failed to generate content.",
+                "message": "File is empty.",
                 "line": None,
             })
             continue
@@ -340,10 +334,9 @@ def run_tests(files):
         elif file_path == "frontend/public/index.html":
             all_errors.extend(test_html_file(file_path, code))
 
-    # Cross-file checks
     all_errors.extend(check_cross_file_consistency(files))
 
-    # Deduplicate errors
+    # Deduplicate
     seen = set()
     unique_errors = []
     for e in all_errors:
@@ -367,7 +360,6 @@ def format_errors_for_log(test_result):
     if test_result["passed"]:
         print("\n✅ TESTER: All checks passed!")
         return
-
     print(f"\n❌ TESTER: {test_result['summary']}")
     for e in test_result["errors"]:
         loc = f" (line {e['line']})" if e.get("line") else ""
