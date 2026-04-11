@@ -127,6 +127,40 @@ def test_js_syntax(file_path, code):
                     "line": i,
                 })
 
+    # ── NEW: Critical App.js export validation ──
+    if "App.js" in file_path and "components/" not in file_path:
+        if "export default" not in code:
+            errors.append({
+                "file": file_path,
+                "type": "critical_missing_export",
+                "message": "App.js missing 'export default' — React will not render anything.",
+                "line": None,
+            })
+        if "function App" not in code and "const App" not in code and "App =" not in code:
+            errors.append({
+                "file": file_path,
+                "type": "critical_missing_component",
+                "message": "App.js missing App component definition (function App or const App).",
+                "line": None,
+            })
+        if "BrowserRouter" not in code and "Routes" not in code:
+            errors.append({
+                "file": file_path,
+                "type": "critical_missing_router",
+                "message": "App.js missing routing — no BrowserRouter or Routes found.",
+                "line": None,
+            })
+
+    # ── NEW: Critical index.js validation ──
+    if file_path.endswith("index.js") and "components/" not in file_path:
+        if "createRoot" not in code:
+            errors.append({
+                "file": file_path,
+                "type": "critical_react18_missing",
+                "message": "index.js missing createRoot — must use React 18 API.",
+                "line": None,
+            })
+
     return errors
 
 def test_package_json(file_path, code):
