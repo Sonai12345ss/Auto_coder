@@ -10,19 +10,18 @@ load_dotenv()
 
 # ─────────────────────────────────────────────
 #  DEBUGGER AGENT
-#  Takes errors from Tester, fixes them using LLM.
-#  Loops up to MAX_RETRIES times until all pass.
+#  Takes errors from Tester, fixes them.
+#  Rule-based fixes first, LLM for complex errors.
 # ─────────────────────────────────────────────
 
 MAX_RETRIES = 3
 
-# Re-use same provider chain as builder
-groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
-groq2   = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
-groq3   = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
-gemini1 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY", ""))
-gemini2 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_2", ""))
-gemini3 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_3", ""))
+groq1      = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+groq2      = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
+groq3      = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
+gemini1    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY", ""))
+gemini2    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_2", ""))
+gemini3    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_3", ""))
 openrouter = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ.get("OPENROUTER_API_KEY", ""))
 doubleword = OpenAI(base_url="https://api.doubleword.ai/v1", api_key=os.environ.get("DOUBLEWORD_API_KEY", ""))
 
@@ -34,7 +33,6 @@ PROVIDERS = [
     {"name": "Gemini-2",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.1, max_tokens=mt)},
     {"name": "Gemini-3",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.1, max_tokens=mt)},
     {"name": "OpenRouter","call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.1, max_tokens=mt)},
-    # Paid fallback — only used when all free providers fail
     {"name": "Doubleword / Qwen3.5-35B",  "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-35B-A3B-FP8",   messages=msgs, temperature=0.1, max_tokens=mt)},
     {"name": "Doubleword / Qwen3.5-397B", "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.1, max_tokens=mt)},
 ]
@@ -47,7 +45,8 @@ def call_llm(messages, max_tokens=4096):
             return provider["call"](messages, max_tokens)
         except Exception as e:
             err = str(e).lower()
-            if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota", "503", "404", "402", "temporarily", "overloaded", "upstream"]):
+            if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota", "503",
+                                       "404", "402", "temporarily", "overloaded", "upstream"]):
                 wait = min(2 ** (attempt % 4), 16)
                 print(f"  ⚠️  {provider['name']} rate limited, waiting {wait}s...")
                 last_error = e
@@ -60,34 +59,28 @@ def call_llm(messages, max_tokens=4096):
 def clean_code(raw):
     """Strip markdown code fences from LLM response."""
     raw = raw.strip()
-    # Remove ```python, ```js, ```jsx, ```html, ```json, ``` fences
     raw = re.sub(r"^```[\w]*\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw)
     return raw.strip()
 
 # ─────────────────────────────────────────────
-#  AUTO-FIX: rule-based fixes (no LLM needed)
+#  RULE-BASED FIXES (no LLM needed — fast)
 # ─────────────────────────────────────────────
 
 def autofix_css_imports(code):
     """Remove component-level CSS imports."""
     lines = code.split("\n")
-    fixed = []
-    removed = 0
-    for line in lines:
-        if re.match(r"^import\s+['\"]\.\/\w+\.css['\"]", line) or \
-           re.match(r"^import\s+['\"]\.\.\/\w+\.css['\"]", line):
-            removed += 1
-            continue
-        fixed.append(line)
+    fixed = [l for l in lines if not (
+        re.match(r"^import\s+['\"]\.\/\w+\.css['\"]", l) or
+        re.match(r"^import\s+['\"]\.\.\/\w+\.css['\"]", l)
+    )]
+    removed = len(lines) - len(fixed)
     return "\n".join(fixed), removed
 
 def autofix_react17_api(code):
     """Replace ReactDOM.render with createRoot."""
     if "ReactDOM.render(" not in code:
         return code, 0
-
-    # Replace the entire render call pattern
     new_code = re.sub(
         r"ReactDOM\.render\(\s*(<[\s\S]*?>)\s*,\s*document\.getElementById\(['\"]root['\"]\)\s*\)",
         lambda m: (
@@ -96,8 +89,7 @@ def autofix_react17_api(code):
         ),
         code
     )
-    # Make sure createRoot is imported
-    if "createRoot" not in code and "from 'react-dom/client'" not in code:
+    if "from 'react-dom/client'" not in new_code:
         new_code = new_code.replace(
             "import ReactDOM from 'react-dom';",
             "import ReactDOM from 'react-dom/client';"
@@ -105,20 +97,15 @@ def autofix_react17_api(code):
     return new_code, 1
 
 def autofix_double_router(code):
-    """Remove BrowserRouter from index.js if present."""
+    """Remove BrowserRouter from index.js."""
     if "BrowserRouter" not in code:
         return code, 0
-
-    # Remove BrowserRouter import
     code = re.sub(r",?\s*BrowserRouter\s*,?", "", code)
-    # Remove wrapping BrowserRouter tags around App
     code = re.sub(r"<BrowserRouter>\s*(<App\s*/>)\s*</BrowserRouter>", r"\1", code)
     return code, 1
 
 def autofix_missing_deps_array(code):
     """Add [] to useEffect calls missing dependency array."""
-    # Pattern: useEffect(() => { ... }) with no , [] before closing )
-    # This is tricky to do perfectly with regex, so we use a simple heuristic
     fixed = re.sub(
         r"(useEffect\s*\(\s*(?:async\s*)?\(\s*\)\s*=>\s*\{[^}]*\}\s*)\)",
         r"\1, [])",
@@ -132,16 +119,26 @@ def autofix_unsafe_error_access(code):
     original = code
     code = code.replace("error.response.status", "error.response?.status")
     code = code.replace("error.response.data", "error.response?.data")
-    changed = 1 if code != original else 0
-    return code, changed
+    return code, (1 if code != original else 0)
 
 def autofix_missing_tailwind(code):
-    """Add Tailwind CDN to index.html if missing."""
+    """Add Tailwind CDN script tag to index.html if missing."""
     if "cdn.tailwindcss.com" in code:
         return code, 0
     tailwind_tag = '    <script src="https://cdn.tailwindcss.com"></script>\n'
     code = code.replace("</head>", tailwind_tag + "</head>")
     return code, 1
+
+def autofix_wrong_tailwind_tag(code):
+    """Fix Tailwind CDN from <link> to <script> tag."""
+    # Replace any <link ...tailwindcss...> with the correct script tag
+    new_code = re.sub(
+        r'<link[^>]*cdn\.tailwindcss\.com[^>]*>',
+        '<script src="https://cdn.tailwindcss.com"></script>',
+        code
+    )
+    changed = 1 if new_code != code else 0
+    return new_code, changed
 
 def autofix_missing_root_div(code):
     """Add root div to index.html if missing."""
@@ -149,6 +146,25 @@ def autofix_missing_root_div(code):
         return code, 0
     code = code.replace("<body>", '<body>\n    <div id="root"></div>')
     return code, 1
+
+def autofix_missing_jwt_import(code):
+    """Add create_access_token to flask_jwt_extended import in routes.py."""
+    # Find existing flask_jwt_extended import and add create_access_token
+    match = re.search(r"from flask_jwt_extended import ([^\n]+)", code)
+    if match:
+        current_imports = match.group(1).strip()
+        if "create_access_token" not in current_imports:
+            new_imports = current_imports + ", create_access_token"
+            code = code.replace(
+                f"from flask_jwt_extended import {current_imports}",
+                f"from flask_jwt_extended import {new_imports}"
+            )
+            return code, 1
+    else:
+        # No flask_jwt_extended import at all — add one after other imports
+        code = "from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token\n" + code
+        return code, 1
+    return code, 0
 
 def apply_rule_based_fixes(file_path, code, errors):
     """Apply all rule-based fixes that don't need LLM."""
@@ -179,8 +195,18 @@ def apply_rule_based_fixes(file_path, code, errors):
         code, n = autofix_missing_tailwind(code)
         total_fixes += n
 
+    # ── NEW: Fix wrong Tailwind <link> tag ──
+    if "wrong_tailwind_tag" in error_types:
+        code, n = autofix_wrong_tailwind_tag(code)
+        total_fixes += n
+
     if "missing_root_div" in error_types:
         code, n = autofix_missing_root_div(code)
+        total_fixes += n
+
+    # ── NEW: Fix missing create_access_token import in routes.py ──
+    if "missing_jwt_import" in error_types:
+        code, n = autofix_missing_jwt_import(code)
         total_fixes += n
 
     return code, total_fixes
@@ -247,6 +273,20 @@ def debug_files(files, test_result):
     fixed_files = dict(files)
 
     for file_path, file_errors in errors_by_file.items():
+        # ── NEW: Handle missing_init_file — generate backend/__init__.py ──
+        if file_path == "backend/__init__.py" and file_path not in fixed_files:
+            # Check if the error is that it's missing entirely
+            if any(e["type"] == "missing_init_file" for e in file_errors):
+                print(f"\n  🔧 Generating missing {file_path}...")
+                fixed_files[file_path] = (
+                    "from flask_sqlalchemy import SQLAlchemy\n"
+                    "from flask_jwt_extended import JWTManager\n\n"
+                    "db = SQLAlchemy()\n"
+                    "jwt = JWTManager()\n"
+                )
+                print(f"    ✅ Generated backend/__init__.py")
+            continue
+
         if file_path not in fixed_files:
             print(f"  ⚠️  Cannot fix {file_path} — file not in generated set")
             continue
@@ -254,12 +294,12 @@ def debug_files(files, test_result):
         code = fixed_files[file_path]
         print(f"\n  🔧 Fixing {file_path} ({len(file_errors)} error(s))...")
 
-        # Step 1: Apply rule-based fixes first (fast, no LLM)
+        # Step 1: Rule-based fixes (fast, no LLM)
         code, rule_fixes = apply_rule_based_fixes(file_path, code, file_errors)
         if rule_fixes > 0:
             print(f"    ✅ Applied {rule_fixes} rule-based fix(es)")
 
-        # Step 2: Check if complex errors remain that need LLM
+        # Step 2: LLM for complex errors that can't be rule-fixed
         needs_llm = [e for e in file_errors if e["type"] in (
             "syntax_error", "missing_component", "misplaced_db_index",
             "missing_field", "missing_dependency", "empty_file",
@@ -278,6 +318,7 @@ def debug_files(files, test_result):
 
     return fixed_files
 
+
 def run_debug_loop(files, tester_fn, max_retries=MAX_RETRIES):
     """
     Full debug loop:
@@ -285,8 +326,6 @@ def run_debug_loop(files, tester_fn, max_retries=MAX_RETRIES):
     2. If errors found, run debugger
     3. Re-run tester
     4. Repeat up to max_retries times
-
-    Returns (final_files, final_test_result, attempts_taken)
     """
     from agent.tester import run_tests, format_errors_for_log
 
@@ -308,10 +347,10 @@ def run_debug_loop(files, tester_fn, max_retries=MAX_RETRIES):
         if attempt < max_retries - 1:
             print(f"\n🔧 Running debugger (attempt {attempt + 1}/{max_retries - 1})...")
             current_files = debug_files(current_files, test_result)
-        
+
         attempt += 1
 
-    # Final test after last fix attempt
+    # Final test after last attempt
     final_result = run_tests(current_files)
     format_errors_for_log(final_result)
 

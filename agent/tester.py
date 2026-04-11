@@ -1,7 +1,6 @@
 import os
 import ast
 import json
-import subprocess
 import re
 
 # ─────────────────────────────────────────────
@@ -14,7 +13,7 @@ def test_python_syntax(file_path, code):
     """Check Python file for syntax errors using AST parse."""
     try:
         ast.parse(code)
-        return None  # No error
+        return None
     except SyntaxError as e:
         return {
             "file": file_path,
@@ -28,14 +27,6 @@ def test_python_imports(file_path, code):
     errors = []
     lines = code.split("\n")
     for i, line in enumerate(lines, 1):
-        # Check for imports that reference non-existent local modules
-        if re.match(r"^from agent\.", line) and "tools" not in line and "memory" not in line and "builder" not in line and "planner" not in line:
-            errors.append({
-                "file": file_path,
-                "type": "bad_import",
-                "message": f"Suspicious local import: {line.strip()}",
-                "line": i,
-            })
         # Check for db.Index inside class body (indented)
         if re.match(r"^\s{4,}db\.Index\(", line):
             errors.append({
@@ -44,6 +35,35 @@ def test_python_imports(file_path, code):
                 "message": f"db.Index() must be outside class body, found indented at line {i}: {line.strip()}",
                 "line": i,
             })
+
+    # ── NEW: Check routes.py uses create_access_token but doesn't import it ──
+    if "routes.py" in file_path and "create_access_token" in code:
+        # Find the flask_jwt_extended import line
+        jwt_import_match = re.search(r"from flask_jwt_extended import ([^\n]+)", code)
+        if jwt_import_match:
+            imported_names = jwt_import_match.group(1)
+            if "create_access_token" not in imported_names:
+                errors.append({
+                    "file": file_path,
+                    "type": "missing_jwt_import",
+                    "message": "routes.py uses create_access_token but doesn't import it from flask_jwt_extended",
+                    "line": None,
+                })
+        else:
+            # No flask_jwt_extended import at all
+            errors.append({
+                "file": file_path,
+                "type": "missing_jwt_import",
+                "message": "routes.py uses create_access_token but has no flask_jwt_extended import",
+                "line": None,
+            })
+
+    # ── NEW: Check app.py imports from backend package correctly ──
+    if "app.py" in file_path:
+        if "from backend import" in code or "from backend." in code:
+            # backend/__init__.py must exist — flagged at cross-file level
+            pass
+
     return errors
 
 def test_js_syntax(file_path, code):
@@ -51,7 +71,7 @@ def test_js_syntax(file_path, code):
     errors = []
     lines = code.split("\n")
 
-    # Check for individual CSS imports (causes missing file errors)
+    # Check for individual CSS imports
     for i, line in enumerate(lines, 1):
         if re.match(r"^import\s+['\"]\.\/\w+\.css['\"]", line) or \
            re.match(r"^import\s+['\"]\.\.\/\w+\.css['\"]", line):
@@ -72,7 +92,7 @@ def test_js_syntax(file_path, code):
                 "line": i,
             })
 
-    # Check for double BrowserRouter pattern
+    # Check for double BrowserRouter in index.js
     if "BrowserRouter" in code and file_path.endswith("index.js"):
         errors.append({
             "file": file_path,
@@ -85,8 +105,6 @@ def test_js_syntax(file_path, code):
     effect_matches = list(re.finditer(r"useEffect\s*\(\s*(?:async\s*)?\(\s*\)\s*=>", code))
     for match in effect_matches:
         snippet = code[match.end():match.end()+300]
-        # Find the closing of this useEffect call
-        # If followed by }) with no , [] before it, it's missing deps
         if re.search(r"\}\s*\)\s*;?\s*\n", snippet):
             dep_check = re.search(r"\}\s*,\s*\[", snippet)
             if not dep_check:
@@ -168,6 +186,7 @@ def test_env_example(file_path, code):
 def test_html_file(file_path, code):
     """Check public/index.html has required elements."""
     errors = []
+
     if '<div id="root">' not in code and "<div id='root'>" not in code:
         errors.append({
             "file": file_path,
@@ -175,19 +194,45 @@ def test_html_file(file_path, code):
             "message": "public/index.html missing <div id=\"root\"></div> — React can't mount.",
             "line": None,
         })
-    if "cdn.tailwindcss.com" not in code:
+
+    # ── NEW: Check Tailwind CDN is a <script> tag, not a <link> tag ──
+    if "cdn.tailwindcss.com" in code:
+        # It's there — but is it a link tag instead of script tag?
+        if '<link' in code and 'tailwindcss' in code and 'tailwind.css' not in code:
+            # Check if it's being used as a link stylesheet (wrong)
+            if re.search(r'<link[^>]*tailwindcss[^>]*>', code):
+                errors.append({
+                    "file": file_path,
+                    "type": "wrong_tailwind_tag",
+                    "message": "Tailwind CDN must use <script src> not <link href>. Replace: <link rel=\"stylesheet\" href=\"https://cdn.tailwindcss.com\"> with <script src=\"https://cdn.tailwindcss.com\"></script>",
+                    "line": None,
+                })
+    else:
+        # Tailwind CDN not present at all
         errors.append({
             "file": file_path,
             "type": "missing_tailwind",
             "message": "public/index.html missing Tailwind CDN script tag.",
             "line": None,
         })
+
     return errors
 
 def check_cross_file_consistency(files):
-    """Check that imported components actually exist in the file list."""
+    """Check imported components exist, and backend/__init__.py is present."""
     errors = []
     file_paths = set(files.keys())
+
+    # ── NEW: Check backend/__init__.py exists when app.py imports from backend ──
+    app_py = files.get("backend/app.py", "")
+    if app_py and ("from backend import" in app_py or "from backend." in app_py):
+        if "backend/__init__.py" not in file_paths:
+            errors.append({
+                "file": "backend/__init__.py",
+                "type": "missing_init_file",
+                "message": "backend/app.py uses 'from backend import db, jwt' but backend/__init__.py is missing. Flask won't start.",
+                "line": None,
+            })
 
     # Build set of component names that exist
     component_names = set()
@@ -196,25 +241,22 @@ def check_cross_file_consistency(files):
             name = os.path.basename(path).replace(".js", "")
             component_names.add(name)
 
-    # Check each JS file's imports
+    # Check each JS file's imports reference things that exist
     for path, code in files.items():
         if not (path.endswith(".js") or path.endswith(".jsx")):
             continue
         lines = code.split("\n")
         for i, line in enumerate(lines, 1):
-            # Match: import Something from './Something' or '../components/Something'
             match = re.match(r"^import\s+\{?\s*(\w+)\s*\}?\s+from\s+['\"](.+)['\"]", line)
             if match:
                 imported_name = match.group(1)
                 import_path = match.group(2)
-                # Only check local relative imports
                 if import_path.startswith("./") or import_path.startswith("../"):
-                    # Skip known valid non-component imports
-                    if import_path in ("../api", "./api", "react", "react-router-dom"):
+                    if import_path in ("../api", "./api"):
                         continue
                     if imported_name not in component_names and imported_name not in (
-                        "React", "useState", "useEffect", "useNavigate",
-                        "Link", "Routes", "Route", "BrowserRouter", "Navigate"
+                        "React", "useState", "useEffect", "useNavigate", "useParams",
+                        "Link", "Routes", "Route", "BrowserRouter", "Navigate", "Outlet"
                     ):
                         errors.append({
                             "file": path,
@@ -246,7 +288,6 @@ def run_tests(files):
             })
             continue
 
-        # Route to appropriate tester
         if file_path.endswith(".py"):
             syntax_err = test_python_syntax(file_path, code)
             if syntax_err:
@@ -268,7 +309,7 @@ def run_tests(files):
     # Cross-file checks
     all_errors.extend(check_cross_file_consistency(files))
 
-    # Deduplicate errors by (file, line, type)
+    # Deduplicate errors
     seen = set()
     unique_errors = []
     for e in all_errors:
