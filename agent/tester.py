@@ -252,12 +252,13 @@ def test_html_file(file_path, code):
             "message": "public/index.html missing Tailwind CDN. Add: <script src=\"https://cdn.tailwindcss.com\"></script>",
             "line": None,
         })
-    # Bug 3: Tailwind loaded as <link> instead of <script> — styles won't apply
-    elif '<link' in code and 'cdn.tailwindcss.com' in code:
+    # Bug 3: Tailwind loaded as <link> instead of <script>
+    # Must check specifically for tailwindcss in a <link> tag, not any <link> tag
+    elif re.search(r'<link[^>]*cdn\.tailwindcss\.com[^>]*>', code):
         errors.append({
             "file": file_path,
             "type": "wrong_tailwind_tag",
-            "message": "Tailwind CDN must use <script src=\"https://cdn.tailwindcss.com\"></script> NOT a <link> tag. CSS CDN link does not work.",
+            "message": "Tailwind CDN must use <script src=\"https://cdn.tailwindcss.com\"></script> NOT a <link> tag.",
             "line": None,
         })
     return errors
