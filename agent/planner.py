@@ -23,18 +23,22 @@ def call_llm(messages):
         ("Groq-1 / llama-3.3-70b",      lambda: groq1.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
         ("Groq-2 / llama-3.3-70b",      lambda: groq2.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
         ("Groq-3 / llama-3.3-70b",      lambda: groq3.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Groq-1 / llama-3.1-8b",       lambda: groq1.chat.completions.create(model="llama-3.1-8b-instant",    messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Groq-2 / llama-3.1-8b",       lambda: groq2.chat.completions.create(model="llama-3.1-8b-instant",    messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Groq-3 / llama-3.1-8b",       lambda: groq3.chat.completions.create(model="llama-3.1-8b-instant",    messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Groq-1 / gemma2-9b",          lambda: groq1.chat.completions.create(model="llama-3.1-8b-instant",            messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Groq-2 / gemma2-9b",          lambda: groq2.chat.completions.create(model="llama-3.1-8b-instant",            messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Groq-3 / gemma2-9b",          lambda: groq3.chat.completions.create(model="llama-3.1-8b-instant",            messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-1 / gemini-2.0-flash",  lambda: gemini1.chat.completions.create(model="gemini-2.0-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-2 / gemini-2.0-flash",  lambda: gemini2.chat.completions.create(model="gemini-2.0-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-3 / gemini-2.0-flash",  lambda: gemini3.chat.completions.create(model="gemini-2.0-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-1 / gemini-2.5-flash",  lambda: gemini1.chat.completions.create(model="gemini-2.5-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-2 / gemini-2.5-flash",  lambda: gemini2.chat.completions.create(model="gemini-2.5-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-3 / gemini-2.5-flash",  lambda: gemini3.chat.completions.create(model="gemini-2.5-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-1 / gemini-2.5-pro",    lambda: gemini1.chat.completions.create(model="gemini-2.5-pro", messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-2 / gemini-2.5-pro",    lambda: gemini2.chat.completions.create(model="gemini-2.5-pro", messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-3 / gemini-2.5-pro",    lambda: gemini3.chat.completions.create(model="gemini-2.5-pro", messages=messages, temperature=0.2, max_tokens=4096)),
         ("OpenRouter / llama-3.3-70b",   lambda: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=messages, temperature=0.2, max_tokens=4096)),
         ("OpenRouter / gemma-3-27b",     lambda: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free", messages=messages, temperature=0.2, max_tokens=4096)),
         ("OpenRouter / gemma-3-12b",     lambda: openrouter.chat.completions.create(model="google/gemma-3-12b-it:free", messages=messages, temperature=0.2, max_tokens=4096)),
+        # Paid fallback — only used when all free providers fail
         ("Doubleword / Qwen3.5-35B",     lambda: doubleword.chat.completions.create(model="Qwen/Qwen3.5-35B-A3B-FP8",    messages=messages, temperature=0.2, max_tokens=4096)),
         ("Doubleword / Qwen3.5-397B",    lambda: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8",  messages=messages, temperature=0.2, max_tokens=4096)),
     ]
@@ -45,15 +49,13 @@ def call_llm(messages):
             return fn()
         except Exception as e:
             err = str(e).lower()
-            if any(x in err for x in ["rate_limit", "rate-limit", "429", "404", "402", "503",
-                                       "quota", "temporarily", "overloaded", "upstream"]):
+            if any(x in err for x in ["rate_limit", "rate-limit", "429", "404", "402", "503", "quota", "temporarily", "overloaded", "upstream"]):
                 wait = min(2 ** (attempt % 4), 16)
                 print(f"  ⚠️  {name} rate limited, waiting {wait}s then trying next...")
                 last_error = e
                 time.sleep(wait)
                 continue
-            elif any(x in err for x in ["decommission", "deprecated", "no longer supported",
-                                         "400", "invalid model"]):
+            elif any(x in err for x in ["decommission", "deprecated", "no longer supported", "400", "invalid model"]):
                 print(f"  ⚠️  {name} model unavailable, trying next...")
                 last_error = e
                 continue
@@ -71,40 +73,41 @@ RULES:
 3. App.js imports components — every component it imports MUST have its own file entry.
 4. NEVER import a component in App.js that is not listed as a file to be generated.
 
-BACKEND FILES (always include ALL of these):
-- backend/__init__.py — Flask extensions: db = SQLAlchemy(), jwt = JWTManager()
+BACKEND FILES (always include all of these):
 - backend/config.py — database URL, SECRET_KEY, JWT_SECRET_KEY, debug settings
 - backend/models.py — SQLAlchemy models with password hashing, to_dict(), created_at
 - backend/routes.py — ALL API endpoints including /api/register, /api/login, /api/user
 - backend/app.py — Flask app factory, register blueprints, init db and JWT
 
-FRONTEND FILES (always include ALL of these):
+FRONTEND FILES (always include all of these):
 - frontend/package.json — react, react-dom, react-scripts, axios, react-router-dom
-- frontend/public/index.html — React HTML template with Tailwind CDN as <script> tag (NOT <link>)
-- frontend/src/index.js — ReactDOM.createRoot entry point (React 18)
-- frontend/src/index.css — minimal CSS, body font only
+- frontend/src/index.js — ReactDOM.render entry point
+- frontend/src/index.css — complete stylesheet with variables, buttons, forms, navbar, cards
 - frontend/src/App.js — routing with BrowserRouter, Routes, Route for every page
 - frontend/src/api.js — axios instance with JWT interceptor, one function per endpoint
 
-FRONTEND COMPONENT FILES (generate based on the project):
-- frontend/src/components/PrivateRoute.js — route guard
-- frontend/src/components/Navbar.js — navigation bar with auth state
-- frontend/src/components/Login.js — login form
-- frontend/src/components/Register.js — register form
-- frontend/src/components/Home.js — landing page
-- For each main resource: [Resource]List.js, [Resource]Form.js, [Resource]Detail.js (if needed)
+FRONTEND COMPONENT FILES (generate based on the project — include ALL of these):
+- frontend/src/components/Navbar.js — navigation bar with auth state (login/logout links)
+- frontend/src/components/Login.js — login form with controlled inputs, error handling
+- frontend/src/components/Register.js — register form with validation
+- frontend/src/components/Home.js — landing/home page component
+- For each main resource in the project, generate:
+  - frontend/src/components/[Resource]List.js — list view with loading/error/empty states
+  - frontend/src/components/[Resource]Form.js — create/edit form with validation
+  - frontend/src/components/[Resource]Detail.js — detail/single view (only if needed)
 
-CRITICAL RULES:
-- backend/__init__.py MUST export: db = SQLAlchemy() and jwt = JWTManager()
+CRITICAL RULES FOR FILES:
 - App.js must ONLY import components that exist in the files list
-- routes.py MUST import create_access_token from flask_jwt_extended
+- Every component listed must have a complete, working implementation
 - routes.py MUST include /api/register (POST), /api/login (POST), /api/user (GET)
 - All list endpoints must support ?page=1&per_page=20 pagination
-- All write endpoints must use @jwt_required()
-- NEVER generate Routing.js, Router.js, Routes.js
-- Tailwind CDN in index.html MUST be: <script src="https://cdn.tailwindcss.com"></script> — NOT a <link> tag
+- All write endpoints must use @jwt_required() and validate input fields
+- NEVER generate a file called Routing.js — it does not exist, routing is handled inside App.js
+- NEVER generate Router.js, Routes.js, or any wrapper routing component
+- ALWAYS include frontend/src/components/PrivateRoute.js — a route guard that redirects to /login if no JWT token in localStorage
+- ALWAYS include frontend/public/index.html — the React HTML template with Tailwind CDN
 
-OUTPUT FORMAT:
+OUTPUT FORMAT — output exactly this JSON structure:
 {
   "project_name": "snake_case_name",
   "description": "one line description",
@@ -115,86 +118,59 @@ OUTPUT FORMAT:
   },
   "files": [
     {
-      "path": "backend/__init__.py",
-      "description": "Flask extensions: db = SQLAlchemy(), jwt = JWTManager()",
-      "depends_on": []
-    },
-    {
       "path": "backend/config.py",
       "description": "Flask config with DATABASE_URL, SECRET_KEY, JWT_SECRET_KEY from env",
       "depends_on": []
     },
     {
       "path": "backend/models.py",
-      "description": "SQLAlchemy models with password hashing, to_dict(), created_at, db.relationship() for every FK",
-      "depends_on": ["backend/__init__.py", "backend/config.py"]
+      "description": "SQLAlchemy models with password hashing via werkzeug, to_dict(), created_at on every model",
+      "depends_on": ["backend/config.py"]
     },
     {
       "path": "backend/routes.py",
-      "description": "All API endpoints. Imports: jwt_required, get_jwt_identity, create_access_token from flask_jwt_extended",
+      "description": "All API endpoints including /api/register, /api/login, /api/user plus all resource endpoints with pagination and JWT protection",
       "depends_on": ["backend/models.py"]
     },
     {
       "path": "backend/app.py",
-      "description": "Flask app factory, init extensions from backend/__init__.py, register blueprint, Flask-Migrate, health check",
-      "depends_on": ["backend/__init__.py", "backend/config.py", "backend/models.py", "backend/routes.py"]
+      "description": "Flask app factory pattern, init db/jwt/cors, register blueprint, health check route",
+      "depends_on": ["backend/config.py", "backend/models.py", "backend/routes.py"]
     },
     {
       "path": "frontend/package.json",
-      "description": "React dependencies: react, react-dom, react-scripts, axios, react-router-dom. proxy: http://localhost:5000",
-      "depends_on": []
-    },
-    {
-      "path": "frontend/public/index.html",
-      "description": "React HTML template. Tailwind CDN as <script src=https://cdn.tailwindcss.com></script>. Has <div id=root>",
+      "description": "React dependencies: react, react-dom, react-scripts, axios, react-router-dom",
       "depends_on": []
     },
     {
       "path": "frontend/src/index.css",
-      "description": "Minimal CSS: body font-family Inter, box-sizing border-box",
+      "description": "Complete stylesheet with CSS variables, body, buttons, forms, inputs, navbar, cards, loading spinner, error states, responsive breakpoints",
       "depends_on": []
     },
     {
       "path": "frontend/src/api.js",
-      "description": "Axios instance with JWT interceptor, one async function per endpoint",
-      "depends_on": []
-    },
-    {
-      "path": "frontend/src/components/PrivateRoute.js",
-      "description": "Route guard: checks localStorage for token, uses React Router v6 Outlet pattern",
+      "description": "Axios instance with baseURL, JWT request interceptor, 401 response interceptor, one async function per API endpoint",
       "depends_on": []
     },
     {
       "path": "frontend/src/components/Navbar.js",
-      "description": "Sticky dark navbar with auth state, logout button",
+      "description": "Navbar component with navigation links, shows login/register when logged out, shows username and logout button when logged in",
       "depends_on": ["frontend/src/api.js"]
     },
     {
       "path": "frontend/src/components/Home.js",
-      "description": "Landing page with gradient hero section and feature cards",
+      "description": "Home page component with welcome message and links to main features",
       "depends_on": []
     },
     {
       "path": "frontend/src/components/Login.js",
-      "description": "Login form, saves token to localStorage, redirects with useNavigate",
+      "description": "Login form with email and password controlled inputs, onSubmit calls api login, shows inline error, calls onLogin prop with token on success",
       "depends_on": ["frontend/src/api.js"]
     },
     {
       "path": "frontend/src/components/Register.js",
-      "description": "Register form with validation, redirects to login on success",
+      "description": "Register form with username, email, password fields, validation, calls api register, redirects to login on success",
       "depends_on": ["frontend/src/api.js"]
-    },
-    {
-      "path": "frontend/src/App.js",
-      "description": "BrowserRouter with Routes. Protected routes wrapped in PrivateRoute.",
-      "depends_on": ["frontend/src/components/Navbar.js", "frontend/src/components/Home.js",
-                     "frontend/src/components/Login.js", "frontend/src/components/Register.js",
-                     "frontend/src/components/PrivateRoute.js"]
-    },
-    {
-      "path": "frontend/src/index.js",
-      "description": "React 18 entry: ReactDOM.createRoot. No BrowserRouter here — App.js has it.",
-      "depends_on": ["frontend/src/App.js"]
     }
   ],
   "database_schema": {
@@ -205,7 +181,7 @@ OUTPUT FORMAT:
           {"name": "id", "type": "Integer PK"},
           {"name": "username", "type": "String(100)"},
           {"name": "email", "type": "String(255)"},
-          {"name": "password_hash", "type": "String(255)"},
+          {"name": "password", "type": "String(255)"},
           {"name": "created_at", "type": "DateTime"}
         ]
       }
@@ -219,20 +195,16 @@ OUTPUT FORMAT:
   "setup_instructions": [
     "Copy .env.example to .env and fill in your values",
     "pip install -r requirements.txt",
-    "flask db init && flask db migrate && flask db upgrade",
-    "python -m backend.app",
+    "python backend/app.py",
     "cd frontend && npm install && npm start"
   ]
 }
 
-IMPORTANT: Add resource-specific files based on the project description.
-The files array MUST include ALL component files that App.js will import.
-backend/__init__.py is ALWAYS required — never omit it.
+IMPORTANT: The files array in your output must include ALL component files that App.js will import.
+Add resource-specific components based on the project (e.g. for a todo app add TodoList.js, TodoForm.js).
 """
 
-# ── backend/__init__.py added to REQUIRED_FILES ──
 REQUIRED_FILES = [
-    "backend/__init__.py",   # ← NEW: prevents "from backend import db" crash
     "backend/config.py",
     "backend/models.py",
     "backend/routes.py",
@@ -251,19 +223,6 @@ REQUIRED_FILES = [
     ".env.example"
 ]
 
-# Default content for backend/__init__.py — used when planner forgets to include it
-BACKEND_INIT_CONTENT = {
-    "backend/__init__.py": {
-        "description": "Flask extensions: db = SQLAlchemy(), jwt = JWTManager()",
-        "default_code": (
-            "from flask_sqlalchemy import SQLAlchemy\n"
-            "from flask_jwt_extended import JWTManager\n\n"
-            "db = SQLAlchemy()\n"
-            "jwt = JWTManager()\n"
-        )
-    }
-}
-
 
 def generate_blueprint(project_description):
     """Takes a project description and returns a structured JSON blueprint."""
@@ -271,11 +230,12 @@ def generate_blueprint(project_description):
 
     response = call_llm([
         {"role": "system", "content": PLANNER_PROMPT},
-        {"role": "user", "content": f"Create a complete blueprint for: {project_description}\n\nRemember: include backend/__init__.py and every component that App.js imports."}
+        {"role": "user", "content": f"Create a complete blueprint for: {project_description}\n\nRemember: every component that App.js imports MUST be in the files list."}
     ])
 
     raw = response.choices[0].message.content.strip()
 
+    # Clean up in case model adds backticks anyway
     if "```json" in raw:
         raw = raw.split("```json")[1].split("```")[0].strip()
     elif "```" in raw:
@@ -284,33 +244,30 @@ def generate_blueprint(project_description):
     try:
         blueprint = json.loads(raw)
 
-        # Enforce required files
+        # Enforce required files are always present
         existing_paths = [f["path"] for f in blueprint["files"]]
         for required in REQUIRED_FILES:
             if required not in existing_paths:
                 print(f"⚠️  Adding missing required file: {required}")
-                entry = {
+                blueprint["files"].append({
                     "path": required,
                     "description": f"Required file: {required}",
                     "depends_on": []
-                }
-                # Use known default description for backend/__init__.py
-                if required == "backend/__init__.py":
-                    entry["description"] = "Flask extensions: db = SQLAlchemy(), jwt = JWTManager()"
-                blueprint["files"].append(entry)
+                })
 
-        # Parse App.js description to find extra components
+        # KEY FIX: Parse App.js description to find any extra components mentioned
+        # and ensure they are in the files list
         app_js_entry = next((f for f in blueprint["files"] if f["path"] == "frontend/src/App.js"), None)
         if app_js_entry:
             existing_paths = [f["path"] for f in blueprint["files"]]
             desc = app_js_entry.get("description", "")
             import re
             component_names = re.findall(r'\b([A-Z][a-zA-Z]+)\b', desc)
-            EXCLUDED = {
-                "React", "Route", "Routes", "BrowserRouter", "Navigate", "Routing",
-                "Link", "NavLink", "App", "Switch", "Router", "Component", "Fragment",
-                "Provider", "Context", "Suspense", "Redirect", "RouterProvider", "PrivateRoute"
-            }
+            EXCLUDED = {"React", "Route", "Routes", "BrowserRouter", "Navigate", "Routing",
+                        "Link", "NavLink", "App", "Switch", "Router", "Component", "Fragment",
+                        "Provider", "Context", "Suspense", "Redirect", "RouterProvider",
+                        "PrivateRoute", "Protected", "AuthRoute", "GuardedRoute",
+                        "Outlet", "Navbar", "Footer", "Layout"}
             for name in component_names:
                 component_path = f"frontend/src/components/{name}.js"
                 if component_path not in existing_paths and name not in EXCLUDED:
@@ -321,18 +278,30 @@ def generate_blueprint(project_description):
                         "depends_on": ["frontend/src/api.js"]
                     })
 
-        # Remove ghost routing files
+        # Remove ghost routing files — React Router concepts, not real components
         GHOST_FILES = {
             "frontend/src/components/Routing.js",
             "frontend/src/components/Router.js",
             "frontend/src/components/Routes.js",
-    "frontend/src/components/Protected.js",
             "frontend/src/Routing.js",
             "frontend/src/Router.js",
+            "frontend/src/components/Protected.js",
+            "frontend/src/components/AuthRoute.js",
+            "frontend/src/components/GuardedRoute.js",
         }
         blueprint["files"] = [f for f in blueprint["files"] if f["path"] not in GHOST_FILES]
 
-        # Sort by dependency order
+        # Always inject backend/__init__.py — Python won't treat backend/ as a package without it
+        # This prevents "from backend import db, jwt" from crashing at startup
+        existing_paths = {f["path"] for f in blueprint["files"]}
+        if "backend/__init__.py" not in existing_paths:
+            blueprint["files"].insert(0, {
+                "path": "backend/__init__.py",
+                "description": "Makes backend a Python package. Initializes db and jwt extensions.",
+                "depends_on": []
+            })
+
+        # Sort files by dependency order
         blueprint["files"] = sorted(
             blueprint["files"],
             key=lambda f: len(f.get("depends_on", []))
@@ -351,11 +320,13 @@ def generate_blueprint(project_description):
         return None
 
 
+# Test it
 if __name__ == "__main__":
     blueprint = generate_blueprint(
         "A real-time chat app where users can create rooms and send messages"
     )
     if blueprint:
+        import os
         os.makedirs("sandbox", exist_ok=True)
         with open("sandbox/blueprint.json", "w") as f:
             json.dump(blueprint, f, indent=2)

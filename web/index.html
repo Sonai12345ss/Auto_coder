@@ -537,20 +537,29 @@
             }
 
             // Detect server restart — status exists on disk but build stage
-            // is still "building" yet no progress for 60+ seconds
+            // is still "building" yet no progress for 90+ seconds
+            // Note: Gemini rate limits can cause 120s waits, so be generous
             if(s.stage === 'building' && Date.now() - start > 60000){
               const lastBuilt = s.built_count + s.failed_count;
               if(!window._lastBuiltCount) window._lastBuiltCount = lastBuilt;
               if(lastBuilt === window._lastBuiltCount){
                 window._staleSince = window._staleSince || Date.now();
-                if(Date.now() - window._staleSince > 90000){
+                const staleDuration = Date.now() - window._staleSince;
+                if(staleDuration > 60000 && !loggedFiles.has('stale_warn')){
+                  loggedFiles.add('stale_warn');
+                  addLog('⏳ Waiting for API rate limits to clear (can take 1-2 min)...', 'muted');
+                }
+                if(staleDuration > 180000){  // 3 minutes of no progress
                   clearInterval(poll);
-                  reject(new Error('Server restarted mid-build. Please try again.'));
+                  reject(new Error('Build stalled — rate limits may be exhausted. Please try again in a few minutes.'));
                   return;
                 }
               } else {
                 window._lastBuiltCount = lastBuilt;
                 window._staleSince = null;
+                if(loggedFiles.has('stale_warn')){
+                  addLog('✅ Build resumed!', 'success');
+                }
               }
             }
 

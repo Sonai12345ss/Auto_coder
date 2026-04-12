@@ -10,11 +10,59 @@ load_dotenv()
 
 # ─────────────────────────────────────────────
 #  DEBUGGER AGENT
-#  Takes errors from Tester, fixes them using LLM.
-#  Loops up to MAX_RETRIES times until all pass.
+#  Takes errors from Tester, fixes them.
+#  Rule-based fixes first, LLM for complex errors.
+#  Learning memory: stores successful fixes across builds.
 # ─────────────────────────────────────────────
 
 MAX_RETRIES = 3
+
+# ─────────────────────────────────────────────
+# PRIORITY 1: LEARNING DEBUGGER
+# Persistent memory of successful fixes.
+# Stored in sandbox/debugger_memory.json
+# Avoids LLM calls for known errors.
+# ─────────────────────────────────────────────
+
+MEMORY_FILE = "sandbox/debugger_memory.json"
+
+def _load_memory():
+    try:
+        if os.path.exists(MEMORY_FILE):
+            return json.loads(open(MEMORY_FILE).read())
+    except Exception:
+        pass
+    return {}
+
+def _save_memory(mem):
+    try:
+        os.makedirs(os.path.dirname(MEMORY_FILE), exist_ok=True)
+        with open(MEMORY_FILE, "w") as f:
+            json.dump(mem, f, indent=2)
+    except Exception:
+        pass
+
+def remember_fix(error_type, file_path, broken_snippet, fixed_snippet):
+    """Store a successful fix pattern for future reuse."""
+    if not broken_snippet or not fixed_snippet or broken_snippet == fixed_snippet:
+        return
+    mem = _load_memory()
+    key = error_type
+    if key not in mem:
+        mem[key] = []
+    # Keep only last 5 fixes per error type to avoid bloat
+    mem[key] = mem[key][-4:] + [{
+        "file_type": os.path.splitext(file_path)[1],
+        "broken": broken_snippet[:300],
+        "fixed": fixed_snippet[:300],
+    }]
+    _save_memory(mem)
+    print(f"    💾 Fix pattern saved for '{error_type}'")
+
+def recall_fix(error_type):
+    """Retrieve past fix examples for a given error type."""
+    mem = _load_memory()
+    return mem.get(error_type, [])
 
 # Re-use same provider chain as builder
 groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
@@ -286,13 +334,25 @@ def apply_rule_based_fixes(file_path, code, errors):
 # ─────────────────────────────────────────────
 
 def fix_with_llm(file_path, code, errors):
-    """Send broken file + errors to LLM for fixing."""
+    """Send broken file + errors to LLM for fixing. Injects past fix examples."""
     error_descriptions = "\n".join([
         f"- [{e['type']}] line {e.get('line', '?')}: {e['message']}"
         for e in errors
     ])
 
     error_types = {e["type"] for e in errors}
+
+    # ── Learning: inject past fix examples ──
+    memory_context = ""
+    for err_type in error_types:
+        past_fixes = recall_fix(err_type)
+        if past_fixes:
+            examples = "\n".join([
+                f"  Example fix for [{err_type}]:\n  BROKEN: {f['broken'][:150]}\n  FIXED: {f['fixed'][:150]}"
+                for f in past_fixes[-2:]  # last 2 examples
+            ])
+            memory_context += f"\nPAST FIX PATTERNS (use these as reference):\n{examples}\n"
+            print(f"    🧠 Injecting {len(past_fixes)} past fix(es) for '{err_type}'")
 
     # Type-specific extra instructions
     extra = ""
@@ -327,7 +387,7 @@ FILE: {file_path}
 
 ERRORS TO FIX:
 {error_descriptions}
-
+{memory_context}
 CURRENT CODE:
 {code}
 
@@ -430,20 +490,37 @@ def debug_files(files, test_result):
 
         if needs_llm:
             print(f"    🤖 Sending to LLM for {len(needs_llm)} complex error(s)...")
+            original_code = code  # save for memory comparison
             try:
-                code = fix_with_llm(file_path, code, needs_llm)
+                fixed_code = fix_with_llm(file_path, code, needs_llm)
                 print(f"    ✅ LLM fix applied")
 
                 # ── Bug 3 fix: post-fix validation for raw_fetch ──
-                # Verify LLM actually removed fetch() — if not, force rule-based removal
                 if any(e["type"] == "raw_fetch_instead_of_api" for e in needs_llm):
-                    if "fetch(" in code and "/api/" in code:
+                    if "fetch(" in fixed_code and "/api/" in fixed_code:
                         print(f"    ⚠️  LLM didn't remove fetch() — applying forced rule fix...")
-                        code, n = autofix_raw_fetch(code, file_path)
+                        fixed_code, n = autofix_raw_fetch(fixed_code, file_path)
                         if n:
                             print(f"    ✅ Force-removed raw fetch() calls")
-                        else:
-                            print(f"    ⚠️  Could not auto-remove fetch() — manual fix needed")
+
+                # ── Learning: save successful fix patterns to memory ──
+                for err in needs_llm:
+                    err_type = err["type"]
+                    # Extract a snippet around the error line for pattern matching
+                    line_num = err.get("line")
+                    if line_num:
+                        lines = original_code.split("\n")
+                        start = max(0, line_num - 2)
+                        end = min(len(lines), line_num + 2)
+                        broken_snippet = "\n".join(lines[start:end])
+                        fixed_lines = fixed_code.split("\n")
+                        fixed_snippet = "\n".join(fixed_lines[start:end]) if len(fixed_lines) > start else fixed_code[:200]
+                    else:
+                        broken_snippet = original_code[:200]
+                        fixed_snippet = fixed_code[:200]
+                    remember_fix(err_type, file_path, broken_snippet, fixed_snippet)
+
+                code = fixed_code
 
             except Exception as e:
                 print(f"    ❌ LLM fix failed: {e}")

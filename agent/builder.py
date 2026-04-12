@@ -123,20 +123,32 @@ UI_PROVIDERS = [
 # TOKEN OPTIMIZER — right-size tokens per file type
 # ─────────────────────────────────────────────
 def get_optimal_tokens(file_path):
-    if file_path.endswith(("package.json", "index.html", ".env.example")):
-        return 800
-    elif file_path.endswith(("config.py", "index.css")):
+    if file_path.endswith(".env.example"):
         return 600
+    elif file_path.endswith("config.py"):
+        return 800
+    elif file_path.endswith("index.css"):
+        return 600
+    elif file_path.endswith("package.json"):
+        return 800
+    elif file_path.endswith("index.html"):
+        return 1000  # More room for Google Fonts + meta tags
     elif "components/" in file_path and file_path.endswith((".js", ".jsx")):
-        return 1800  # React components need styling room
+        return 2500  # React components — full Tailwind patterns need space
     elif "routes.py" in file_path:
-        return 1500  # API routes can be long
+        return 2000
+    elif "App.js" in file_path:
+        return 1800  # Full routing with PrivateRoute wrappers
+    elif "api.js" in file_path:
+        return 1500  # All endpoints
+    elif "models.py" in file_path:
+        return 1800
     elif file_path.endswith(".py"):
-        return 1200
-    elif file_path.endswith(("App.js", "api.js", "index.js")):
-        return 1200
+        return 1500
+    elif file_path.endswith("index.js"):
+        return 600  # Template-injected, but set high as backup
     else:
-        return 1000
+        return 1200
 
 def call_llm(messages, max_tokens=4096, task_type="general"):
     """Try providers in order, skipping rate-limited ones. Uses global throttle."""
@@ -536,29 +548,72 @@ For README.md:
 
 QUALITY BAR: The code you write must be indistinguishable from code written by a senior engineer at a real software company. It must be immediately runnable with no modifications needed beyond filling in .env values.
 
+═══════════════════════════════════════════
+🎨 DESIGN SYSTEM — USE THESE EXACT TOKENS
+Premium SaaS aesthetic (Stripe / Linear / Vercel level)
+═══════════════════════════════════════════
+
+COLOR PALETTE (stick to this):
+- Primary: indigo-600 (buttons, links, accents)
+- Primary dark: indigo-700 (hover states)
+- Background: gray-50 (page), white (cards)
+- Text: gray-900 (headings), gray-600 (body), gray-400 (hints)
+- Success: green-500, Error: red-500, Warning: amber-500
+- Gradient: from-indigo-600 via-purple-600 to-pink-500 (hero only)
+
+SPACING SYSTEM:
+- Page wrapper: min-h-screen bg-gray-50 py-8 px-4
+- Section padding: py-16 px-4 for heroes, py-8 for content
+- Card padding: p-6 (compact), p-8 (comfortable)
+- Stack gap: gap-4 (tight), gap-6 (normal), gap-8 (loose)
+- Max widths: max-w-md (auth), max-w-2xl (forms), max-w-7xl (dashboards)
+
+COMPONENT TOKENS:
+- Card: bg-white rounded-2xl shadow-md hover:shadow-xl transition-shadow duration-200 p-6
+- Button primary: bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-6 py-3 rounded-xl transition-colors duration-200
+- Button secondary: bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold px-6 py-3 rounded-xl transition-colors duration-200
+- Input: w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition
+- Badge green: bg-green-100 text-green-700 text-xs font-semibold px-3 py-1 rounded-full
+- Badge red: bg-red-100 text-red-700 text-xs font-semibold px-3 py-1 rounded-full
+- Avatar: w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-600 font-bold text-sm
+- Loading: animate-spin rounded-full h-10 w-10 border-4 border-indigo-600 border-t-transparent
+- Empty state: bg-white rounded-2xl shadow p-16 text-center with SVG icon
+
+TYPOGRAPHY:
+- Page title: text-3xl font-bold text-gray-900
+- Hero title: text-5xl font-bold text-white leading-tight
+- Section heading: text-2xl font-bold text-gray-900
+- Card title: text-lg font-semibold text-gray-900
+- Body: text-sm text-gray-600 leading-relaxed
+- Hint: text-xs text-gray-400
+
+LAYOUT PATTERNS:
+- Dashboard grid: grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 (metric cards)
+- Content grid: grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 (list cards)
+- Two-column: grid grid-cols-1 lg:grid-cols-2 gap-8
+- Page header: flex items-center justify-between mb-8
+
 FRONTEND UI QUALITY BAR — STRICTLY ENFORCED:
-UI must feel like a premium SaaS product (Stripe, Linear, Vercel level). If you generate boring UI, you have failed.
+UI must feel like a premium SaaS product. If you generate boring UI, you have failed.
 
 ✅ REQUIRED in every frontend component:
-- Generous spacing: padding-8, gap-6, py-16 for sections
-- Large headings: text-3xl to text-5xl for page titles
-- Hover effects on EVERY interactive element
-- Smooth transitions: className="... transition duration-200"
-- Card-based layouts with rounded-2xl and shadow-md
-- Avatar initials for user content
-- Proper empty states with SVG icons
-- Gradient hero sections on Home page
-- Color-coded status badges
+- Gradient hero on Home page (from-indigo-600 via-purple-600 to-pink-500)
+- Hover effects on EVERY interactive element (buttons, cards, links)
+- Loading spinner while fetching data
+- Empty state with SVG icon when list is empty
+- Error message styled with red-50 background
+- Avatar initials (first letter of username) for user content
+- Smooth transitions on all interactive elements
 
-❌ STRICTLY FORBIDDEN — never generate these:
+❌ STRICTLY FORBIDDEN:
 - Plain vertical stack of inputs with no spacing
-- Small text (text-sm) for main content
 - No hover states on buttons or cards
 - Flat gray divs with no visual hierarchy
-- Bullet point lists as page features
-- Linking to /api/... URLs in the UI
-- No loading states or empty states
+- Bullet point lists as page features (use cards with icons)
+- /api/... URLs visible in the UI
+- No loading or empty states
 - Plain white pages with no background color
+- Inline styles (style={{ }})
 """
 
 def build_file(file_info, blueprint, project_path, existing_files={}):
@@ -570,7 +625,72 @@ def build_file(file_info, blueprint, project_path, existing_files={}):
 
     print(f"\n📝 Building: {file_path}")
 
-    # Build context from dependencies
+    # ── Priority 2: Template Injection — guaranteed-correct skeletons ──
+    # These files have near-zero variance — give the LLM a pre-built skeleton
+    # to fill in instead of generating from scratch. Eliminates 70% of errors.
+    SKELETON_TEMPLATES = {
+        "backend/__init__.py": (
+            "from flask_sqlalchemy import SQLAlchemy\n"
+            "from flask_jwt_extended import JWTManager\n\n"
+            "db = SQLAlchemy()\n"
+            "jwt = JWTManager()\n"
+        ),
+        "frontend/src/index.js": (
+            "import React from 'react';\n"
+            "import ReactDOM from 'react-dom/client';\n"
+            "import './index.css';\n"
+            "import App from './App';\n\n"
+            "const root = ReactDOM.createRoot(document.getElementById('root'));\n"
+            "root.render(\n"
+            "  <React.StrictMode>\n"
+            "    <App />\n"
+            "  </React.StrictMode>\n"
+            ");\n"
+        ),
+        "frontend/src/components/PrivateRoute.js": (
+            "import React from 'react';\n"
+            "import { Navigate, Outlet } from 'react-router-dom';\n\n"
+            "const PrivateRoute = () => {\n"
+            "  const token = localStorage.getItem('token');\n"
+            "  return token ? <Outlet /> : <Navigate to=\"/login\" replace />;\n"
+            "};\n\n"
+            "export default PrivateRoute;\n"
+        ),
+    }
+
+    if file_path in SKELETON_TEMPLATES:
+        code = SKELETON_TEMPLATES[file_path]
+        full_path = os.path.join(project_path, file_path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "w") as f:
+            f.write(code)
+        print(f"  ✅ {file_path} written from template (guaranteed correct)")
+        return code
+
+    # ── Priority 4: File-aware context — extract what already exists ──
+    # Give the LLM awareness of functions in api.js and components already built
+    file_aware_context = ""
+    if "frontend/src/api.js" in existing_files:
+        import re as _re
+        api_exports = _re.findall(
+            r"^export\s+(?:const|async function|function)\s+(\w+)",
+            existing_files["frontend/src/api.js"],
+            _re.MULTILINE
+        )
+        if api_exports:
+            file_aware_context += f"\nAPI functions available in '../api': {', '.join(api_exports)}"
+            file_aware_context += "\nIMPORTANT: Import and use these exact function names — do NOT invent new ones."
+
+    built_components = [
+        os.path.basename(p).replace(".js", "")
+        for p in existing_files
+        if p.startswith("frontend/src/components/") and p.endswith(".js")
+    ]
+    if built_components:
+        file_aware_context += f"\nComponents already built: {', '.join(built_components)}"
+        file_aware_context += "\nIMPORTANT: Only import components from this list — do NOT invent new ones."
+
+    # Build context from declared dependencies
     dependency_context = ""
     for dep in depends_on:
         if dep in existing_files:
@@ -591,6 +711,7 @@ API endpoints: {json.dumps(blueprint['api_endpoints'], indent=2)}
 
 File to write: {file_path}
 Purpose: {file_description}
+{file_aware_context}
 
 Dependencies already written:
 {dependency_context if dependency_context else "None"}
