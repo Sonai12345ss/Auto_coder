@@ -391,6 +391,7 @@ def run_tests(files):
         "summary": "All tests passed ✅" if passed else f"{len(unique_errors)} error(s) found in {files_with_errors} file(s)",
     }
 
+
 def format_errors_for_log(test_result):
     """Pretty print test results to console."""
     if test_result["passed"]:

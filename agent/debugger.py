@@ -562,6 +562,7 @@ def run_debug_loop(files, tester_fn, max_retries=MAX_RETRIES):
         
         attempt += 1
 
+
     # Final test after last fix attempt
     final_result = run_tests(current_files)
     format_errors_for_log(final_result)

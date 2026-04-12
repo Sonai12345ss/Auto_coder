@@ -320,6 +320,7 @@ def generate_blueprint(project_description):
         return None
 
 
+
 # Test it
 if __name__ == "__main__":
     blueprint = generate_blueprint(
