@@ -10,7 +10,6 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from agent.tools import write_file, read_file, execute_python_code
 
-# Memory/ChromaDB disabled — was causing 79MB ONNX download on every Render restart
 MEMORY_ENABLED = False
 def query_experience(desc): return ""
 def add_experience(desc, code, error=None): pass
@@ -18,11 +17,11 @@ def add_experience(desc, code, error=None): pass
 load_dotenv()
 
 # ═══════════════════════════════════════════════════════════════
-# GLOBAL RATE LIMITER — prevents burst API requests hitting 429
+# GLOBAL RATE LIMITER
 # ═══════════════════════════════════════════════════════════════
 _RATE_LIMIT_LOCK = threading.Lock()
 _LAST_REQUEST_TIME = 0
-_MIN_INTERVAL = 2.0  # seconds between API calls globally
+_MIN_INTERVAL = 2.0
 
 def _throttle():
     global _LAST_REQUEST_TIME
@@ -34,7 +33,7 @@ def _throttle():
         _LAST_REQUEST_TIME = time.time()
 
 # ═══════════════════════════════════════════════════════════════
-# PROVIDER HEALTH TRACKER — skip rate-limited providers
+# PROVIDER HEALTH TRACKER
 # ═══════════════════════════════════════════════════════════════
 class ProviderHealth:
     def __init__(self):
@@ -57,14 +56,12 @@ class ProviderHealth:
             return datetime.now() >= self.blocked_until[name]
 
     def reset_all(self):
-        """Reset all blocks — called when all providers are exhausted"""
         with self._lock:
             self.failures.clear()
             self.blocked_until.clear()
 
 _health = ProviderHealth()
 
-# Pre-initialize all clients once at startup (faster than creating per call)
 groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 groq2   = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
 groq3   = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
@@ -74,38 +71,28 @@ gemini3 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/open
 openrouter  = OpenAI(base_url="https://openrouter.ai/api/v1",      api_key=os.environ.get("OPENROUTER_API_KEY", ""))
 doubleword  = OpenAI(base_url="https://api.doubleword.ai/v1",       api_key=os.environ.get("DOUBLEWORD_API_KEY", ""))
 
-# OPTIMIZED PROVIDER ORDER: highest free quota first
-# gemini-2.0-flash: 1500 RPD free | groq: 14400 RPD | 2.5-flash: 1000 RPD | 2.5-pro: 50 RPD
 PROVIDERS = [
-    # Gemini 2.0 Flash FIRST — highest free daily quota (1500 req/day × 3 keys)
     {"name": "Gemini-1 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Groq llama-3.3-70b SECOND — fast, generous free tier
     {"name": "Groq-1 / llama-3.3-70b",       "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-2 / llama-3.3-70b",       "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-3 / llama-3.3-70b",       "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Groq llama-3.1-8b THIRD — highest Groq RPM limit
     {"name": "Groq-1 / llama-3.1-8b",        "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-2 / llama-3.1-8b",        "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Groq-3 / llama-3.1-8b",        "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
-    # OpenRouter free models FOURTH
     {"name": "OpenRouter / llama-3.3-70b",   "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "OpenRouter / gemma-3-27b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Gemini 2.5 Flash — good quality, moderate quota
     {"name": "Gemini-1 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Gemini 2.5 Pro — best quality but lowest quota (2 RPM on free tier)
     {"name": "Gemini-1 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Gemini-3 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
-    # Paid fallback — only used when all free providers fail
     {"name": "Doubleword / Qwen3.5-35B",     "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-35B-A3B-FP8",   messages=msgs, temperature=0.15, max_tokens=mt)},
     {"name": "Doubleword / Qwen3.5-397B",    "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.15, max_tokens=mt)},
 ]
 
-# UI pipeline — flash first (higher RPM), pro as fallback
 UI_PROVIDERS = [
     {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
@@ -120,7 +107,8 @@ UI_PROVIDERS = [
 ]
 
 # ─────────────────────────────────────────────
-# TOKEN OPTIMIZER — right-size tokens per file type
+# CHANGE 1: TOKEN OPTIMIZER — increased sizes
+# components: 2500→3500 | routes: 2000→2500 | api.js: 1500→2000
 # ─────────────────────────────────────────────
 def get_optimal_tokens(file_path):
     if file_path.endswith(".env.example"):
@@ -132,30 +120,29 @@ def get_optimal_tokens(file_path):
     elif file_path.endswith("package.json"):
         return 800
     elif file_path.endswith("index.html"):
-        return 1000  # More room for Google Fonts + meta tags
+        return 1000
     elif "components/" in file_path and file_path.endswith((".js", ".jsx")):
-        return 2500  # React components — full Tailwind patterns need space
+        return 3500  # ↑ was 2500 — more room for full Tailwind UI patterns
     elif "routes.py" in file_path:
-        return 2000
+        return 2500  # ↑ was 2000 — full CRUD + pagination without truncation
     elif "App.js" in file_path:
-        return 1800  # Full routing with PrivateRoute wrappers
+        return 1800
     elif "api.js" in file_path:
-        return 1500  # All endpoints
+        return 2000  # ↑ was 1500 — all endpoints + interceptors fit cleanly
     elif "models.py" in file_path:
         return 1800
     elif file_path.endswith(".py"):
         return 1500
     elif file_path.endswith("index.js"):
-        return 600  # Template-injected, but set high as backup
+        return 600
     else:
         return 1200
 
+
 def call_llm(messages, max_tokens=4096, task_type="general"):
-    """Try providers in order, skipping rate-limited ones. Uses global throttle."""
     provider_list = UI_PROVIDERS if task_type == "ui" else PROVIDERS
     last_error = None
 
-    # Filter to available providers, fall back to all if everything blocked
     available = [p for p in provider_list if _health.is_available(p['name'])]
     if not available:
         print("  ⚠️  All providers in cooldown — resetting and retrying...")
@@ -165,7 +152,7 @@ def call_llm(messages, max_tokens=4096, task_type="general"):
     for provider in available:
         try:
             print(f"  🤖 Using {provider['name']}...")
-            _throttle()  # Global rate limiter — prevents burst 429s
+            _throttle()
             response = provider["call"](messages, max_tokens)
             _health.ok(provider['name'])
             return response
@@ -190,444 +177,162 @@ def call_llm(messages, max_tokens=4096, task_type="general"):
 
     raise Exception(f"All providers failed. Last error: {last_error}")
 
-BUILDER_PROMPT = """
-You are a senior full stack engineer with 10+ years of experience. You write production-grade code that is secure, maintainable, and complete. Your job is to write a single file as part of a larger project.
+
+# ═══════════════════════════════════════════════════════════════
+# CHANGE 2: SPLIT PROMPTS
+# BACKEND_PROMPT: Flask/Python only — no UI rules, ~3200 tokens
+# FRONTEND_PROMPT: React/Tailwind only — no Flask rules, ~3500 tokens
+# Previously a single BUILDER_PROMPT at ~6400 tokens input each call
+# ═══════════════════════════════════════════════════════════════
+
+BACKEND_PROMPT = """
+You are a senior Flask/Python engineer. Write production-grade backend code.
 
 ABSOLUTE RULES:
-1. Output ONLY raw code. Zero explanation, zero markdown, zero backticks.
-2. Every file must be 100% complete — no placeholders, no "TODO", no "pass", no "..." ellipsis.
-3. Never write stub functions. Every function must have real, working logic.
-4. Stay consistent with the blueprint: use exact model names, field names, and endpoint paths provided.
-5. All imports must be correct and match the actual file structure.
+1. Output ONLY raw code. No explanation, no markdown, no backticks.
+2. Every file must be 100% complete — no placeholders, no "TODO", no "pass".
+3. All imports must be correct and match the actual file structure.
 
-═══════════════════════════════════════════
-⛔ HARD STOPS — INVALID OUTPUT DEFINITIONS
-These make your response INVALID and will trigger an automatic retry.
-═══════════════════════════════════════════
+⛔ HARD STOPS — INVALID if these appear:
+❌ from backend.api import anything — backend/api.py does not exist. Call db/models directly.
+❌ db = SQLAlchemy() in app.py or models.py — ONLY backend/__init__.py defines db and jwt.
+❌ Duplicate db.Index() names — every index name must be globally unique across all models.
+❌ db.Index() inside a class body — ALWAYS place OUTSIDE and AFTER class definitions.
 
-INVALID if any of these appear in a React component:
-❌ fetch('/api/...')  — NEVER use raw fetch() for API calls. ALWAYS use named functions from '../api'
-❌ import './ComponentName.css'  — NEVER import per-component CSS files. Tailwind only.
-❌ ReactDOM.render()  — NEVER use React 17 API. Use ReactDOM.createRoot() only.
-❌ import {} from 'react-router-dom'  — NEVER import unused symbols.
-❌ <BrowserRouter> in index.js  — BrowserRouter lives in App.js only.
-❌ style={{ ... }}  — NEVER use inline styles. Tailwind className only.
-❌ TODO / FIXME / placeholder / pass  — NEVER leave stubs.
-❌ import LoadingSpinner / import ErrorAlert  — NEVER import components not in the blueprint.
-
-INVALID if these appear in backend/routes.py:
-❌ Missing: from flask_jwt_extended import create_access_token  — ALWAYS import it when used.
-
-INVALID if these appear in backend/models.py:
-❌ db.Index() inside a class body (indented) — ALWAYS place db.Index() AFTER and OUTSIDE the class.
-
-CORRECT PATTERNS (memorize these):
-✅ React API calls:  import { getRooms } from '../api';  then call getRooms() in useEffect
-✅ React 18:  const root = ReactDOM.createRoot(document.getElementById('root')); root.render(...)
-✅ Error handling:  error.response?.data?.message || error.message || 'Something went wrong'
-✅ useEffect:  useEffect(() => { fetchData(); }, []);  — dependency array is REQUIRED
-
-═══════════════════════════════════════════
-BACKEND RULES (Flask/Python)
-═══════════════════════════════════════════
+For backend/__init__.py:
+- ONLY: db = SQLAlchemy() and jwt = JWTManager() — nothing else.
 
 For backend/config.py:
-- Load all config from environment variables using os.environ.get()
-- Include: SECRET_KEY, DATABASE_URL (fallback to SQLite), DEBUG, JWT_SECRET_KEY
-- Set JWT_ACCESS_TOKEN_EXPIRES to timedelta(hours=24)
-- Set SQLALCHEMY_TRACK_MODIFICATIONS = False
+- Load all from os.environ.get() with fallbacks.
+- Include: SECRET_KEY, DATABASE_URL (fallback sqlite), DEBUG, JWT_SECRET_KEY.
+- JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24). SQLALCHEMY_TRACK_MODIFICATIONS = False.
 
 For backend/models.py:
-- Use SQLAlchemy models with proper relationships using db.relationship() and backref
-- ALWAYS add db.relationship() for every foreign key — never leave FK without a relationship
-- Example: posts = db.relationship('Post', backref='author', lazy=True)
-- Include password hashing via werkzeug: generate_password_hash, check_password_hash
-- Include created_at = db.Column(db.DateTime, default=datetime.utcnow) on every model
-- Include to_dict() method on every model returning all fields as JSON-serializable dict
-- Place db.Index() OUTSIDE and AFTER class definitions, never inside
-- Use Flask-SQLAlchemy with proper column types (String, Integer, Float, Boolean, DateTime, Text)
-- Every model MUST have: id (primary key), created_at (DateTime, default=datetime.utcnow)
-- Every string field MUST have a max length: String(100), String(255), etc.
-- Add db.Index() for any foreign key column — MUST be placed OUTSIDE and AFTER the class definition, never inside it. Example: db.Index('ix_user_id', MyModel.user_id)
-- Add __repr__ for every model
-- to_dict() method must include ALL fields, converting datetime with .isoformat()
-- Hash passwords using werkzeug.security.generate_password_hash — NEVER store plain text passwords
-- Add a check_password(password) method to any User model
+- from backend import db  (NEVER redefine db here)
+- db.relationship() for EVERY foreign key.
+- password hashing via werkzeug.
+- created_at on every model, to_dict() with .isoformat() for datetimes.
+- db.Index() OUTSIDE and AFTER class definitions. Names MUST be unique: ix_post_user_id not ix_user_id.
+- Every model: id (PK), created_at, to_dict(), __repr__().
+- NEVER store plain text passwords.
 
 For backend/routes.py:
-- Generate EVERY endpoint from the blueprint api_endpoints — never skip any
-- Every POST/PUT endpoint MUST validate required fields and return 400 with clear error messages if missing
-- Login endpoint MUST accept username field (not email) to match the Register form: data.get('username'), data.get('password')
-- Register endpoint MUST accept: username, email, password
-- Login success response MUST return a JWT token: {"token": create_access_token(identity=user.id), "user": user.to_dict()}
-- Every GET list endpoint MUST support pagination: ?page=1&per_page=20 using .paginate()
-- Return paginated responses as: {"items": [...], "total": n, "page": n, "pages": n}
-- Every DELETE endpoint returns {"message": "Deleted successfully"}
-- Use proper HTTP status codes: 200, 201, 400, 401, 403, 404, 409, 500
-- Wrap all database writes in try/except, return 500 on db errors with db.session.rollback()
-- Use @jwt_required() decorator to protect any route that modifies data
-- Add CORS-safe responses using flask_cors
+- from backend import db (NEVER from backend.api import anything)
+- from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
+- Every POST/PUT validates required fields → 400 with clear message if missing.
+- Login: accepts username + password, returns {"token": create_access_token(identity=user.id), "user": user.to_dict()}
+- All GET list endpoints: ?page=1&per_page=20 with .paginate(), return {"items":[...], "total":n, "page":n, "pages":n}
+- Wrap all db writes in try/except with db.session.rollback() on error.
+- @jwt_required() on all write endpoints.
 
 For backend/app.py:
-- Create app factory pattern: def create_app()
-- Initialize extensions: db, jwt, CORS, migrate
-- MUST include Flask-Migrate: from flask_migrate import Migrate — then migrate = Migrate(app, db)
-- Register blueprints
-- Add a health check route: GET /health returns {"status": "ok"}
-- ALWAYS import jsonify from flask: from flask import Flask, jsonify
-- if __name__ == "__main__": app.run(debug=True, port=5000)
-- With Flask-Migrate, users run: flask db init && flask db migrate && flask db upgrade
+- from backend import db, jwt (NEVER redefine db = SQLAlchemy() here)
+- Factory: def create_app()
+- Extensions: db.init_app(app), jwt.init_app(app), CORS(app), Migrate(app, db)
+- Register blueprint from backend.routes.
+- /health route → {"status": "ok"}
+- from flask import Flask, jsonify
+"""
 
-For requirements.txt:
-- Include: flask, flask-cors, flask-sqlalchemy, flask-jwt-extended, flask-migrate, sqlalchemy, psycopg2-binary, python-dotenv, werkzeug
+FRONTEND_PROMPT = """
+You are a senior React engineer. Write production-grade frontend code using Tailwind CSS.
 
-═══════════════════════════════════════════
-FRONTEND RULES (React)
-═══════════════════════════════════════════
+ABSOLUTE RULES:
+1. Output ONLY raw code. No explanation, no markdown, no backticks.
+2. Every file must be 100% complete — no placeholders, no "TODO".
+3. NEVER truncate. Write every function, every JSX block, every handler to completion.
 
-For frontend/src/App.js:
-- MUST contain real routing using React Router v6 (BrowserRouter, Routes, Route)
-- Include routes for every major page inferred from the blueprint
-- Include a Navbar component with navigation links
-- Handle auth state: check localStorage for JWT token, show login/logout accordingly
-- Every page component must be imported and rendered — no empty shells
+⛔ HARD STOPS — INVALID if these appear:
+❌ fetch('/api/...') — NEVER raw fetch. ALWAYS use named imports from '../api'.
+❌ import './ComponentName.css' — NEVER per-component CSS. Tailwind only.
+❌ ReactDOM.render() — NEVER React 17. Use ReactDOM.createRoot() only.
+❌ <BrowserRouter> in index.js — BrowserRouter lives in App.js only.
+❌ style={{ ... }} — NEVER inline styles. Tailwind className only.
+❌ TODO / placeholder — NEVER stubs.
+❌ import LoadingSpinner / import ErrorAlert — NEVER import components not in blueprint.
 
-For frontend/src/api.js:
-- Use axios with baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000'
-- Add axios request interceptor to inject Authorization: Bearer <token> from localStorage
-- Add axios response interceptor: on 401, clear localStorage and redirect to /login
-- Export individual async functions for EVERY API endpoint in the blueprint
-- Each function uses try/catch and re-throws errors for the caller to handle
-
-For frontend/public/index.html:
-- Standard React HTML template with <div id="root"></div>
-- Include proper meta charset, viewport tags
-- Title should match the project name
-- Include Tailwind CSS CDN: <script src="https://cdn.tailwindcss.com"></script>
-- Include Google Fonts: Inter font family
+CORRECT PATTERNS:
+✅ API calls: import { getRooms } from '../api'; then call in useEffect.
+✅ React 18: const root = ReactDOM.createRoot(document.getElementById('root')); root.render(...)
+✅ Errors: error.response?.data?.message || error.message || 'Something went wrong'
+✅ useEffect: ALWAYS with dependency array [].
 
 For frontend/src/index.js:
-- MUST use React 18 createRoot API: const root = ReactDOM.createRoot(document.getElementById('root')); root.render(<React.StrictMode><App /></React.StrictMode>)
-- NEVER wrap App in BrowserRouter here — App.js already has BrowserRouter
-- NEVER use ReactDOM.render() — it is deprecated in React 18
-- NEVER add empty imports like import {} from 'react-router-dom' — only import what is actually used
-- Only import: react, react-dom/client, ./index.css, ./App
+- React 18 createRoot. No BrowserRouter here. Only imports: react, react-dom/client, ./index.css, ./App.
 
 For frontend/src/App.js:
-- MUST contain real routing using React Router v6 (BrowserRouter, Routes, Route)
-- Include routes for every major page inferred from the blueprint
-- Include a Navbar component with navigation links
-- NEVER add a second BrowserRouter — only one at the top level
-- Handle auth with localStorage directly — NO onLogin props passed to children
-- CRITICAL: ONLY import components that are explicitly listed in the blueprint files array
-- NEVER invent new component names like CreatePostPage, EditPostPage, ProfilePage — use the exact filenames from the blueprint
-- If a form is needed for creating/editing, use the existing [Resource]Form.js component with a route param
-- Example: <Route path="/posts/new" element={<PostForm />} /> and <Route path="/posts/:id/edit" element={<PostForm />} />
-- NEVER create inline placeholder components like const CreatePostPage = () => <div>...</div>
-- Login/Register components handle their own redirect using useNavigate() after success
+- React Router v6: BrowserRouter, Routes, Route.
+- Export default function App. Routes for every page.
+- ONLY import components explicitly in blueprint files array.
+- Protected routes: <Route element={<PrivateRoute />}> wrapping children.
 
 For frontend/src/api.js:
-- Use axios with baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000'
-- Add axios request interceptor to inject Authorization: Bearer <token> from localStorage
-- Add axios response interceptor: on 401, clear localStorage and redirect to /login
-- Export individual async functions for EVERY API endpoint in the blueprint
-- Each function uses try/catch and re-throws errors for the caller to handle
-- NEVER export the axios instance as default — only export named functions
-- NEVER import the axios instance directly in components — always import named functions
-  Correct: import { getProducts, login } from '../api'
-  Wrong: import axios from '../api' or import api from '../api'
+- axios with baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000'
+- Request interceptor: inject Authorization Bearer token from localStorage.
+- Response interceptor: on 401, clear localStorage and redirect to /login.
+- Named exports only — one async function per API endpoint.
+- MUST include: interceptors block + ALL endpoint functions. Do not stop early.
 
-For frontend/src/components/PrivateRoute.js:
-- A route guard component that checks localStorage for a JWT token
-- If token exists: render the child component (use React Router v6 Outlet pattern)
-- If no token: redirect to /login using Navigate from react-router-dom
-- Exact implementation:
-  import React from 'react';
-  import { Navigate, Outlet } from 'react-router-dom';
-  const PrivateRoute = () => {
-    const token = localStorage.getItem('token');
-    return token ? <Outlet /> : <Navigate to="/login" replace />;
-  };
-  export default PrivateRoute;
-- App.js must wrap all protected routes with PrivateRoute:
-  <Route element={<PrivateRoute />}>
-    <Route path="/dashboard" element={<Dashboard />} />
-    <Route path="/orders" element={<OrderList />} />
-    <Route path="/cart" element={<Cart />} />
-  </Route>
-- Public routes (login, register, home) must NOT be inside PrivateRoute
+For components/:
+- Every useEffect MUST have [].
+- Navbar: check localStorage.getItem('token') BEFORE calling getUser(). Skip if no token.
+- Forms: controlled inputs + onChange + onSubmit with preventDefault().
+- After POST/PUT/DELETE: refresh data list automatically.
+- ONLY import from: react, react-router-dom, ../api.
 
+COMPLETE COMPONENT STRUCTURE (follow this exactly for every component):
+1. import statements (react, react-router-dom, ../api)
+2. const ComponentName = () => {
+3.   useState declarations
+4.   useEffect with fetch + dependency array []
+5.   handler functions (handleSubmit, handleDelete, etc.)
+6.   return ( ... complete JSX ... )
+7. }
+8. export default ComponentName;
+(Steps 1-8 ALL required. File is invalid if any step is missing.)
 
-- ALL styling MUST use Tailwind CSS utility classes. Never write inline styles or import CSS files.
-- NEVER import individual CSS files per component (no './Home.css' etc.)
-- NEVER link to internal API URLs in the UI (never show /api/posts as a link)
+UI DESIGN TOKENS:
+- Page wrapper: min-h-screen bg-gray-50 py-8 px-4
+- Card: bg-white rounded-2xl shadow-md hover:shadow-xl transition p-6
+- Button primary: bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-6 py-3 rounded-xl transition
+- Button secondary: bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold px-6 py-3 rounded-xl transition
+- Input: w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition
+- Loading: <div className="animate-spin rounded-full h-10 w-10 border-4 border-indigo-600 border-t-transparent"></div>
+- Error: bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm
+- Empty state: bg-white rounded-2xl shadow p-16 text-center with SVG icon
 
-═══════════════════════════════════════════
-UI DESIGN PATTERNS (copy these exactly)
-═══════════════════════════════════════════
-
-NAVBAR pattern — dark, sticky, professional:
+NAVBAR (dark sticky):
   <nav className="bg-gray-900 sticky top-0 z-50 shadow-lg">
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-      <div className="flex items-center justify-between h-16">
-        <Link to="/" className="text-white font-bold text-xl tracking-tight">AppName</Link>
-        <div className="flex items-center gap-6">
-          <Link to="/posts" className="text-gray-300 hover:text-white transition text-sm font-medium">Posts</Link>
-          {user ? (
-            <div className="flex items-center gap-4">
-              <span className="text-gray-300 text-sm">Hi, {user.username}</span>
-              <button onClick={handleLogout} className="bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition">Logout</button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-3">
-              <Link to="/login" className="text-gray-300 hover:text-white text-sm font-medium transition">Login</Link>
-              <Link to="/register" className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition">Sign up</Link>
-            </div>
-          )}
-        </div>
-      </div>
+    <div className="max-w-7xl mx-auto px-4 flex items-center justify-between h-16">
+      <Link to="/" className="text-white font-bold text-xl">AppName</Link>
+      {token ? (logout button) : (login + signup links)}
     </div>
   </nav>
 
-HOME page pattern — hero section with gradient, feature cards:
-  <div className="min-h-screen bg-gray-50">
-    {/* Hero */}
-    <div className="bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 text-white py-24 px-4">
-      <div className="max-w-4xl mx-auto text-center">
-        <h1 className="text-5xl font-bold mb-6 leading-tight">App Title Here</h1>
-        <p className="text-xl text-indigo-100 mb-10 max-w-2xl mx-auto">One line description of what this app does.</p>
-        <div className="flex flex-col sm:flex-row gap-4 justify-center">
-          <Link to="/register" className="bg-white text-indigo-600 font-bold px-8 py-3 rounded-xl hover:bg-indigo-50 transition shadow-lg">Get Started Free</Link>
-          <Link to="/login" className="border-2 border-white text-white font-bold px-8 py-3 rounded-xl hover:bg-white hover:text-indigo-600 transition">Sign In</Link>
-        </div>
-      </div>
-    </div>
-    {/* Feature cards */}
-    <div className="max-w-6xl mx-auto px-4 py-16">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="bg-white rounded-2xl shadow-md p-8 hover:shadow-xl transition">
-          <div className="w-12 h-12 bg-indigo-100 rounded-xl flex items-center justify-center mb-4">
-            <svg className="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-          </div>
-          <h3 className="text-lg font-bold text-gray-900 mb-2">Feature Title</h3>
-          <p className="text-gray-500 text-sm leading-relaxed">Feature description here.</p>
-        </div>
-      </div>
-    </div>
-  </div>
+HOME (gradient hero + feature cards):
+  Hero: bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500, text-5xl font-bold
+  Features: grid grid-cols-1 md:grid-cols-3 gap-8, bg-white rounded-2xl shadow-md p-8
 
-LOGIN/REGISTER pattern — centered card with branding:
-  <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50 flex items-center justify-center px-4">
-    <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-8">
-      <div className="text-center mb-8">
-        <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
-          <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
-        </div>
-        <h2 className="text-2xl font-bold text-gray-900">Welcome back</h2>
-        <p className="text-gray-500 text-sm mt-1">Sign in to your account</p>
-      </div>
-      {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl mb-6 text-sm">{error}</div>}
-      <form onSubmit={handleSubmit} className="space-y-5">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">Username</label>
-          <input className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition" type="text" value={username} onChange={e => setUsername(e.target.value)} placeholder="Enter your username" required />
-        </div>
-        <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-xl transition shadow-md">Sign In</button>
-      </form>
-      <p className="text-center text-sm text-gray-500 mt-6">Don't have an account? <Link to="/register" className="text-indigo-600 font-medium hover:underline">Sign up</Link></p>
-    </div>
-  </div>
+LOGIN/REGISTER (centered card):
+  min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50, max-w-md, rounded-2xl shadow-xl p-8
 
-LIST page pattern — page header + grid of cards:
-  <div className="min-h-screen bg-gray-50 py-8 px-4">
-    <div className="max-w-7xl mx-auto">
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Page Title</h1>
-          <p className="text-gray-500 mt-1">Subtitle description</p>
-        </div>
-        <Link to="/new" className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-6 py-3 rounded-xl transition shadow-md flex items-center gap-2">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4"/></svg>
-          New Item
-        </Link>
-      </div>
-      {loading && <div className="flex justify-center py-16"><div className="animate-spin rounded-full h-12 w-12 border-4 border-indigo-600 border-t-transparent"></div></div>}
-      {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm">{error}</div>}
-      {!loading && items.length === 0 && (
-        <div className="bg-white rounded-2xl shadow p-16 text-center">
-          <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"/></svg>
-          </div>
-          <h3 className="text-lg font-semibold text-gray-900 mb-1">No items yet</h3>
-          <p className="text-gray-500 text-sm">Get started by creating your first one.</p>
-        </div>
-      )}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {items.map(item => (
-          <div key={item.id} className="bg-white rounded-2xl shadow-md hover:shadow-xl transition p-6 cursor-pointer group">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-600 font-bold text-sm">{item.username?.[0]?.toUpperCase() || 'U'}</div>
-              <div>
-                <p className="font-semibold text-gray-900 text-sm">{item.username}</p>
-                <p className="text-gray-400 text-xs">{new Date(item.created_at).toLocaleDateString()}</p>
-              </div>
-            </div>
-            <p className="text-gray-700 text-sm leading-relaxed line-clamp-3">{item.content || item.title}</p>
-          </div>
-        ))}
-      </div>
-    </div>
-  </div>
+LIST pages: max-w-7xl, grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6
+FORM pages: max-w-2xl, bg-white rounded-2xl shadow-md p-8
 
-FORM page pattern — clean centered form:
-  <div className="min-h-screen bg-gray-50 py-8 px-4">
-    <div className="max-w-2xl mx-auto">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900">Create New Item</h1>
-        <p className="text-gray-500 mt-1">Fill in the details below</p>
-      </div>
-      <div className="bg-white rounded-2xl shadow-md p-8">
-        {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl mb-6 text-sm">{error}</div>}
-        {success && <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-xl mb-6 text-sm">{success}</div>}
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Field Label</label>
-            <input className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition" type="text" placeholder="Enter value..." required />
-          </div>
-          <div className="flex gap-4 pt-2">
-            <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-8 py-3 rounded-xl transition shadow-md">Save</button>
-            <button type="button" onClick={() => navigate(-1)} className="bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold px-8 py-3 rounded-xl transition">Cancel</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  </div>
-
-GENERAL UI RULES:
-- Use rounded-2xl for cards and modals (not rounded-xl)
-- Use shadow-md normally, shadow-xl on hover
-- Avatar initials: first letter of username in a colored circle
-- Dates: always use toLocaleDateString() not raw ISO string
-- Page wrapper: min-h-screen bg-gray-50 py-8 px-4
-- Content width: max-w-7xl mx-auto for lists, max-w-2xl for forms, max-w-md for auth
-- Transitions: always add "transition" class to interactive elements
-- NEVER use bullet point lists as page features — use feature cards with icons instead
-
-For frontend/src/components/ files — HOOKS & BUG-FREE RULES:
-- Every component must use React hooks: useState for local state, useEffect for data fetching
-- CRITICAL: Every useEffect MUST have a dependency array []. NEVER write useEffect(() => {}) without []
-- Correct: useEffect(() => { fetchData() }, []) — runs once on mount only
-- CRITICAL: Navbar MUST check localStorage.getItem('token') before calling getUser(). If no token, skip API call entirely.
-- CRITICAL: All error handling must check if error.response exists before accessing error.response.status
-  Safe pattern: const msg = error.response?.data?.message || error.message || 'Something went wrong'
-- Forms must have controlled inputs with onChange handlers and onSubmit with preventDefault()
-- After successful POST/PUT/DELETE, refresh the data list automatically
-- NEVER import LoadingSpinner, Pagination, ErrorAlert or any helper component not in the blueprint file list
-- Write loading/error/empty/pagination logic INLINE
-- Loading inline: {loading && <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-10 w-10 border-4 border-indigo-600 border-t-transparent"></div></div>}
-- ONLY import from: react, react-router-dom, ../api
-
-For frontend/package.json:
-- Include: react, react-dom, react-scripts, axios, react-router-dom as dependencies
-- Include start, build, test scripts
-- Set proxy: "http://localhost:5000" for development
-
-For frontend/src/index.css:
-- Minimal CSS — just body font-family: 'Inter', sans-serif and box-sizing: border-box
-- All real styling is done via Tailwind classes in components
-
-═══════════════════════════════════════════
-GENERAL FILES
-═══════════════════════════════════════════
-
-For .env.example:
-- Include: DATABASE_URL, SECRET_KEY, JWT_SECRET_KEY, DEBUG, FLASK_ENV, REACT_APP_API_URL
-
-For README.md:
-- Include: project description, tech stack, prerequisites, setup steps (backend + frontend), environment variables table, API endpoints table with method/path/description/auth columns
-
-QUALITY BAR: The code you write must be indistinguishable from code written by a senior engineer at a real software company. It must be immediately runnable with no modifications needed beyond filling in .env values.
-
-═══════════════════════════════════════════
-🎨 DESIGN SYSTEM — USE THESE EXACT TOKENS
-Premium SaaS aesthetic (Stripe / Linear / Vercel level)
-═══════════════════════════════════════════
-
-COLOR PALETTE (stick to this):
-- Primary: indigo-600 (buttons, links, accents)
-- Primary dark: indigo-700 (hover states)
-- Background: gray-50 (page), white (cards)
-- Text: gray-900 (headings), gray-600 (body), gray-400 (hints)
-- Success: green-500, Error: red-500, Warning: amber-500
-- Gradient: from-indigo-600 via-purple-600 to-pink-500 (hero only)
-
-SPACING SYSTEM:
-- Page wrapper: min-h-screen bg-gray-50 py-8 px-4
-- Section padding: py-16 px-4 for heroes, py-8 for content
-- Card padding: p-6 (compact), p-8 (comfortable)
-- Stack gap: gap-4 (tight), gap-6 (normal), gap-8 (loose)
-- Max widths: max-w-md (auth), max-w-2xl (forms), max-w-7xl (dashboards)
-
-COMPONENT TOKENS:
-- Card: bg-white rounded-2xl shadow-md hover:shadow-xl transition-shadow duration-200 p-6
-- Button primary: bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-6 py-3 rounded-xl transition-colors duration-200
-- Button secondary: bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold px-6 py-3 rounded-xl transition-colors duration-200
-- Input: w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition
-- Badge green: bg-green-100 text-green-700 text-xs font-semibold px-3 py-1 rounded-full
-- Badge red: bg-red-100 text-red-700 text-xs font-semibold px-3 py-1 rounded-full
-- Avatar: w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-600 font-bold text-sm
-- Loading: animate-spin rounded-full h-10 w-10 border-4 border-indigo-600 border-t-transparent
-- Empty state: bg-white rounded-2xl shadow p-16 text-center with SVG icon
-
-TYPOGRAPHY:
-- Page title: text-3xl font-bold text-gray-900
-- Hero title: text-5xl font-bold text-white leading-tight
-- Section heading: text-2xl font-bold text-gray-900
-- Card title: text-lg font-semibold text-gray-900
-- Body: text-sm text-gray-600 leading-relaxed
-- Hint: text-xs text-gray-400
-
-LAYOUT PATTERNS:
-- Dashboard grid: grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 (metric cards)
-- Content grid: grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 (list cards)
-- Two-column: grid grid-cols-1 lg:grid-cols-2 gap-8
-- Page header: flex items-center justify-between mb-8
-
-FRONTEND UI QUALITY BAR — STRICTLY ENFORCED:
-UI must feel like a premium SaaS product. If you generate boring UI, you have failed.
-
-✅ REQUIRED in every frontend component:
-- Gradient hero on Home page (from-indigo-600 via-purple-600 to-pink-500)
-- Hover effects on EVERY interactive element (buttons, cards, links)
-- Loading spinner while fetching data
-- Empty state with SVG icon when list is empty
-- Error message styled with red-50 background
-- Avatar initials (first letter of username) for user content
-- Smooth transitions on all interactive elements
-
-❌ STRICTLY FORBIDDEN:
-- Plain vertical stack of inputs with no spacing
-- No hover states on buttons or cards
-- Flat gray divs with no visual hierarchy
-- Bullet point lists as page features (use cards with icons)
-- /api/... URLs visible in the UI
-- No loading or empty states
-- Plain white pages with no background color
-- Inline styles (style={{ }})
+✅ REQUIRED in every component: gradient hero on Home, hover effects, loading spinner, empty state with SVG, error styled red-50.
 """
 
+
 def build_file(file_info, blueprint, project_path, existing_files={}):
-    """Builds a single file based on blueprint context."""
-    
+    """Builds a single file. Uses BACKEND_PROMPT or FRONTEND_PROMPT based on file type."""
+
     file_path = file_info["path"]
     file_description = file_info["description"]
     depends_on = file_info.get("depends_on", [])
 
     print(f"\n📝 Building: {file_path}")
 
-    # ── Priority 2: Template Injection — guaranteed-correct skeletons ──
-    # These files have near-zero variance — give the LLM a pre-built skeleton
-    # to fill in instead of generating from scratch. Eliminates 70% of errors.
+    # ── Template injection — guaranteed-correct skeletons ──
     SKELETON_TEMPLATES = {
         "backend/__init__.py": (
             "from flask_sqlalchemy import SQLAlchemy\n"
@@ -667,8 +372,7 @@ def build_file(file_info, blueprint, project_path, existing_files={}):
         print(f"  ✅ {file_path} written from template (guaranteed correct)")
         return code
 
-    # ── Priority 4: File-aware context — extract what already exists ──
-    # Give the LLM awareness of functions in api.js and components already built
+    # ── File-aware context ──
     file_aware_context = ""
     if "frontend/src/api.js" in existing_files:
         import re as _re
@@ -679,7 +383,7 @@ def build_file(file_info, blueprint, project_path, existing_files={}):
         )
         if api_exports:
             file_aware_context += f"\nAPI functions available in '../api': {', '.join(api_exports)}"
-            file_aware_context += "\nIMPORTANT: Import and use these exact function names — do NOT invent new ones."
+            file_aware_context += "\nIMPORTANT: Import and use ONLY these exact function names — do NOT invent new ones."
 
     built_components = [
         os.path.basename(p).replace(".js", "")
@@ -688,21 +392,18 @@ def build_file(file_info, blueprint, project_path, existing_files={}):
     ]
     if built_components:
         file_aware_context += f"\nComponents already built: {', '.join(built_components)}"
-        file_aware_context += "\nIMPORTANT: Only import components from this list — do NOT invent new ones."
+        file_aware_context += "\nIMPORTANT: Only import components from this list."
 
-    # Build context from declared dependencies
     dependency_context = ""
     for dep in depends_on:
         if dep in existing_files:
             dependency_context += f"\n\n--- {dep} ---\n{existing_files[dep]}"
 
-    # Query memory for similar past solutions
     past_experience = query_experience(file_description)
     memory_context = ""
     if past_experience and past_experience[0]:
         memory_context = "\nPAST SIMILAR CODE (use as reference):\n" + "\n".join(past_experience[0])
 
-    # Build the prompt
     user_prompt = f"""
 Project: {blueprint['description']}
 Stack: {blueprint['stack']}
@@ -719,30 +420,37 @@ Dependencies already written:
 {memory_context}
 
 Write the COMPLETE, PRODUCTION-READY code for {file_path} now.
-Remember: No placeholders, no TODOs, no stubs. Real working code only.
+No placeholders, no TODOs, no stubs. Real working code only.
 """
 
-    history = [
-        {"role": "system", "content": BUILDER_PROMPT},
-        {"role": "user", "content": user_prompt}
-    ]
-
-    last_error = ""
-    final_code = ""
-    failure_patterns = []  # #4: track what went wrong each attempt
-
-    # Use UI-specialized pipeline + more tokens for frontend files
+    # CHANGE 2: Route to the correct prompt based on file type
+    is_backend = file_path.startswith("backend/") and file_path.endswith(".py")
     is_frontend = file_path.startswith("frontend/") and file_path.endswith((".js", ".jsx", ".css", ".html"))
-    task_type = "ui" if is_frontend else "general"
+
+    if is_backend:
+        system_prompt = BACKEND_PROMPT
+        task_type = "general"
+    else:
+        system_prompt = FRONTEND_PROMPT
+        task_type = "ui"
+
     max_tokens = get_optimal_tokens(file_path)
 
     if is_frontend:
         print(f"  🎨 Using UI pipeline with {max_tokens} tokens")
 
+    history = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+
+    last_error = ""
+    final_code = ""
+    failure_patterns = []
+
     for attempt in range(1, 4):
         if attempt > 1:
             print(f"  🔄 Retry attempt {attempt}...")
-            # #4: inject failure memory into retry prompt
             if failure_patterns:
                 failure_hint = "\n\nPREVIOUS ATTEMPT FAILURES (do NOT repeat these):\n" + "\n".join(
                     f"- {p}" for p in failure_patterns
@@ -755,7 +463,6 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
             print(f"  ❌ All providers failed: {str(e)[:120]}")
             return final_code
 
-        # Safe extraction — prevents NoneType.strip() crash
         if not response or not response.choices:
             failure_patterns.append("model returned empty response — output complete code")
             continue
@@ -765,16 +472,70 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
             continue
         code = raw.strip()
 
-        # Clean up backticks
         code = (code.replace("```python", "").replace("```javascript", "")
                 .replace("```jsx", "").replace("```css", "")
                 .replace("```json", "").replace("```html", "")
                 .replace("```", "").strip())
 
-        # Catch obviously bad output
         if len(code) < 50:
             failure_patterns.append(f"output was too short ({len(code)} chars) — write the COMPLETE file")
             continue
+
+        # ──────────────────────────────────────────────
+        # CHANGE 3: TRUNCATION DETECTION for .js files
+        # Before writing, validate the file isn't cut off
+        # ──────────────────────────────────────────────
+        if file_path.endswith(".js") and "components/" in file_path:
+            truncation_issues = []
+
+            if "export default" not in code:
+                truncation_issues.append("missing 'export default' — component is truncated")
+            if "return (" not in code and "return(" not in code:
+                truncation_issues.append("missing 'return (' — JSX block is truncated")
+
+            if truncation_issues:
+                component_name = os.path.basename(file_path).replace(".js", "")
+                print(f"  ❌ Truncation detected: {', '.join(truncation_issues)}")
+                failure_patterns.append(
+                    f"TRUNCATED OUTPUT — the file was cut off before completion. "
+                    f"You MUST write all 9 steps: "
+                    f"1) imports 2) const {component_name} = () => {{ 3) useState 4) useEffect with [] "
+                    f"5) handlers 6) return ( 7) complete JSX 8) closing }} 9) export default {component_name}; "
+                    f"Do NOT stop before step 9."
+                )
+                history.append({"role": "assistant", "content": code})
+                history.append({"role": "user", "content": f"TRUNCATED — {' | '.join(truncation_issues)}. Write the COMPLETE file including export default and return ()."})
+                continue
+
+        # CHANGE 4: api.js specific truncation check
+        if file_path == "frontend/src/api.js":
+            api_issues = []
+
+            if "interceptors" not in code:
+                api_issues.append("missing axios interceptors block")
+            if "export" not in code:
+                api_issues.append("missing exported functions")
+
+            # Check that functions exist for each blueprint endpoint
+            import re as _re
+            export_count = len(_re.findall(r"^export\s+const\s+\w+", code, _re.MULTILINE))
+            endpoint_count = len(blueprint.get("api_endpoints", []))
+            if export_count < max(2, endpoint_count - 2):  # allow up to 2 missing
+                api_issues.append(f"only {export_count} exported functions but {endpoint_count} endpoints defined — likely truncated")
+
+            if api_issues:
+                print(f"  ❌ api.js truncation detected: {', '.join(api_issues)}")
+                failure_patterns.append(
+                    f"api.js is INCOMPLETE: {', '.join(api_issues)}. "
+                    f"api.js MUST contain: 1) axios instance with baseURL "
+                    f"2) request interceptor (JWT injection) "
+                    f"3) response interceptor (401 → clear localStorage + redirect) "
+                    f"4) one exported async function per API endpoint ({endpoint_count} total). "
+                    f"Write all sections completely."
+                )
+                history.append({"role": "assistant", "content": code})
+                history.append({"role": "user", "content": f"api.js is incomplete: {' | '.join(api_issues)}. Write the FULL api.js with interceptors AND all {endpoint_count} endpoint functions."})
+                continue
 
         # Write file to project
         full_path = os.path.join(project_path, file_path)
@@ -782,7 +543,6 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
         with open(full_path, "w") as f:
             f.write(code)
 
-        # Only run syntax check for Python files
         if file_path.endswith(".py"):
             result = execute_python_code(f"import ast\nast.parse(open('{full_path}').read())\nprint('syntax ok')")
             if "syntax ok" in result["stdout"]:
@@ -795,18 +555,18 @@ Remember: No placeholders, no TODOs, no stubs. Real working code only.
                 print(f"  ❌ Syntax error: {last_error[:100]}")
                 failure_patterns.append(f"syntax error: {last_error[:150]}")
                 history.append({"role": "assistant", "content": code})
-                history.append({"role": "user", "content": f"Syntax error found:\n{last_error}\n\nFix the syntax error and output the complete corrected file."})
+                history.append({"role": "user", "content": f"Syntax error:\n{last_error}\n\nFix and output the complete corrected file."})
         else:
             print(f"  ✅ {file_path} built successfully")
             final_code = code
             return code
 
-    print(f"  ⚠️ Could not fix {file_path} after 3 attempts")
+    print(f"  ⚠️  Could not fix {file_path} after 3 attempts")
     return final_code
 
 
 def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, on_file_done=None):
-    """Builds an entire project from a blueprint — parallel where possible."""
+    """Builds an entire project from a blueprint — sequential for stability."""
 
     project_name = blueprint["project_name"]
     project_path = os.path.join(output_dir, project_name)
@@ -819,18 +579,10 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
     failed_files = []
     files = blueprint["files"]
 
-    # ─────────────────────────────────────────────
-    # Split files into dependency waves:
-    # Wave 0: no dependencies (build in parallel)
-    # Wave 1: depends on wave 0 (build in parallel after wave 0)
-    # Wave 2: depends on wave 1, etc.
-    # ─────────────────────────────────────────────
     def get_waves(files):
-        """Group files into waves based on dependencies."""
         completed = set()
         waves = []
         remaining = list(files)
-
         while remaining:
             wave = []
             still_remaining = []
@@ -841,7 +593,6 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
                 else:
                     still_remaining.append(f)
             if not wave:
-                # Circular deps or unresolvable — just add all remaining
                 wave = still_remaining
                 still_remaining = []
             for f in wave:
@@ -856,8 +607,6 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
     for wave_idx, wave in enumerate(waves):
         print(f"\n🌊 Wave {wave_idx + 1}/{len(waves)}: {len(wave)} file(s)")
 
-        # SEQUENTIAL — one file at a time to prevent rate limit bursts
-        # and reduce RAM usage on Render's 512MB free tier
         for file_info in wave:
             if on_file_start:
                 on_file_start(file_info["path"])
@@ -876,13 +625,10 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
                 if on_file_done:
                     on_file_done(file_info["path"], success=False)
 
-        # Pause between waves
         if wave_idx < len(waves) - 1:
             time.sleep(3)
 
-    # ─────────────────────────────────────────────
-    # PHASE 2: TEST + DEBUG LOOP
-    # ─────────────────────────────────────────────
+    # ── TEST + DEBUG LOOP ──
     print(f"\n{'='*50}")
     print("🧪 RUNNING TESTER + DEBUGGER...")
     print(f"{'='*50}")
@@ -891,14 +637,12 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
         from agent.tester import run_tests, format_errors_for_log
         from agent.debugger import run_debug_loop
 
-        # Run full test → debug → retest loop (max 3 attempts)
         existing_files, final_test_result, attempts = run_debug_loop(
             files=existing_files,
             tester_fn=run_tests,
             max_retries=3
         )
 
-        # Write back any fixed files to disk
         for file_path, code in existing_files.items():
             full_path = os.path.join(project_path, file_path)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -910,22 +654,10 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
     except Exception as e:
         print(f"\n⚠️  Tester/Debugger failed: {e} — continuing with unvalidated build")
 
-    # Write requirements.txt
-    requirements = """flask
-flask-cors
-flask-sqlalchemy
-flask-jwt-extended
-flask-migrate
-sqlalchemy
-psycopg2-binary
-python-dotenv
-werkzeug
-"""
     with open(os.path.join(project_path, "requirements.txt"), "w") as f:
-        f.write(requirements)
+        f.write("flask\nflask-cors\nflask-sqlalchemy\nflask-jwt-extended\nflask-migrate\nsqlalchemy\npsycopg2-binary\npython-dotenv\nwerkzeug\n")
     print("\n📄 requirements.txt written")
 
-    # Write README
     readme = f"""# {project_name.replace('_', ' ').title()}
 
 {blueprint['description']}
@@ -936,29 +668,21 @@ werkzeug
 - Database: {blueprint['stack']['database']}
 
 ## Prerequisites
-- Python 3.9+
-- Node.js 16+
-- PostgreSQL
+- Python 3.9+, Node.js 16+, PostgreSQL
 
 ## Setup
 
 ### Backend
 ```bash
-cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: venv\\Scripts\\activate
 pip install -r requirements.txt
-cp .env.example .env      # Fill in your values
+cp .env.example .env
 flask db init && flask db migrate && flask db upgrade
-python app.py
+python -m backend.app
 ```
 
 ### Frontend
 ```bash
-cd frontend
-npm install
-cp .env.example .env      # Set REACT_APP_API_URL
-npm start
+cd frontend && npm install && npm start
 ```
 
 ## Environment Variables
@@ -982,7 +706,6 @@ npm start
         f.write(readme)
     print("📄 README.md written")
 
-    # Summary
     print(f"\n{'='*50}")
     print(f"✅ Project built: {len(existing_files)}/{len(files)} files")
     if failed_files:
@@ -992,14 +715,11 @@ npm start
     return project_path, existing_files, failed_files
 
 
-# Test it
 if __name__ == "__main__":
     from agent.planner import generate_blueprint
-
     blueprint = generate_blueprint(
         "A simple e-commerce store where users can browse products, add to cart, and place orders"
     )
-
     if blueprint:
         project_path, built, failed = build_project(blueprint)
         print(f"\nBuilt files: {list(built.keys())}")

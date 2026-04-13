@@ -12,17 +12,10 @@ load_dotenv()
 #  DEBUGGER AGENT
 #  Takes errors from Tester, fixes them.
 #  Rule-based fixes first, LLM for complex errors.
-#  Learning memory: stores successful fixes across builds.
+#  Learning memory: stores successful fixes.
 # ─────────────────────────────────────────────
 
 MAX_RETRIES = 3
-
-# ─────────────────────────────────────────────
-# PRIORITY 1: LEARNING DEBUGGER
-# Persistent memory of successful fixes.
-# Stored in sandbox/debugger_memory.json
-# Avoids LLM calls for known errors.
-# ─────────────────────────────────────────────
 
 MEMORY_FILE = "sandbox/debugger_memory.json"
 
@@ -43,14 +36,12 @@ def _save_memory(mem):
         pass
 
 def remember_fix(error_type, file_path, broken_snippet, fixed_snippet):
-    """Store a successful fix pattern for future reuse."""
     if not broken_snippet or not fixed_snippet or broken_snippet == fixed_snippet:
         return
     mem = _load_memory()
     key = error_type
     if key not in mem:
         mem[key] = []
-    # Keep only last 5 fixes per error type to avoid bloat
     mem[key] = mem[key][-4:] + [{
         "file_type": os.path.splitext(file_path)[1],
         "broken": broken_snippet[:300],
@@ -60,11 +51,9 @@ def remember_fix(error_type, file_path, broken_snippet, fixed_snippet):
     print(f"    💾 Fix pattern saved for '{error_type}'")
 
 def recall_fix(error_type):
-    """Retrieve past fix examples for a given error type."""
     mem = _load_memory()
     return mem.get(error_type, [])
 
-# Re-use same provider chain as builder
 groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 groq2   = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
 groq3   = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
@@ -82,7 +71,6 @@ PROVIDERS = [
     {"name": "Gemini-2",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.1, max_tokens=mt)},
     {"name": "Gemini-3",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.1, max_tokens=mt)},
     {"name": "OpenRouter","call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.1, max_tokens=mt)},
-    # Paid fallback — only used when all free providers fail
     {"name": "Doubleword / Qwen3.5-35B",  "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-35B-A3B-FP8",   messages=msgs, temperature=0.1, max_tokens=mt)},
     {"name": "Doubleword / Qwen3.5-397B", "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.1, max_tokens=mt)},
 ]
@@ -106,105 +94,68 @@ def call_llm(messages, max_tokens=4096):
     raise Exception(f"All providers failed. Last error: {last_error}")
 
 def clean_code(raw):
-    """Strip markdown code fences from LLM response."""
     raw = raw.strip()
-    # Remove ```python, ```js, ```jsx, ```html, ```json, ``` fences
     raw = re.sub(r"^```[\w]*\n?", "", raw)
     raw = re.sub(r"\n?```$", "", raw)
     return raw.strip()
 
 # ─────────────────────────────────────────────
-#  AUTO-FIX: rule-based fixes (no LLM needed)
+#  RULE-BASED FIXES (no LLM needed)
 # ─────────────────────────────────────────────
 
 def autofix_css_imports(code):
-    """Remove component-level CSS imports."""
     lines = code.split("\n")
-    fixed = []
-    removed = 0
-    for line in lines:
-        if re.match(r"^import\s+['\"]\.\/\w+\.css['\"]", line) or \
-           re.match(r"^import\s+['\"]\.\.\/\w+\.css['\"]", line):
-            removed += 1
-            continue
-        fixed.append(line)
-    return "\n".join(fixed), removed
+    fixed = [l for l in lines if not (
+        re.match(r"^import\s+['\"]\.\/\w+\.css['\"]", l) or
+        re.match(r"^import\s+['\"]\.\.\/\w+\.css['\"]", l)
+    )]
+    return "\n".join(fixed), len(lines) - len(fixed)
 
 def autofix_react17_api(code):
-    """Replace ReactDOM.render with createRoot."""
     if "ReactDOM.render(" not in code:
         return code, 0
-
-    # Replace the entire render call pattern
     new_code = re.sub(
         r"ReactDOM\.render\(\s*(<[\s\S]*?>)\s*,\s*document\.getElementById\(['\"]root['\"]\)\s*\)",
-        lambda m: (
-            "const root = ReactDOM.createRoot(document.getElementById('root'));\n"
-            f"root.render({m.group(1)})"
-        ),
+        lambda m: f"const root = ReactDOM.createRoot(document.getElementById('root'));\nroot.render({m.group(1)})",
         code
     )
-    # Make sure createRoot is imported
-    if "createRoot" not in code and "from 'react-dom/client'" not in code:
-        new_code = new_code.replace(
-            "import ReactDOM from 'react-dom';",
-            "import ReactDOM from 'react-dom/client';"
-        )
+    if "from 'react-dom/client'" not in new_code:
+        new_code = new_code.replace("import ReactDOM from 'react-dom';", "import ReactDOM from 'react-dom/client';")
     return new_code, 1
 
 def autofix_double_router(code):
-    """Remove BrowserRouter from index.js if present."""
     if "BrowserRouter" not in code:
         return code, 0
-
-    # Remove BrowserRouter import
     code = re.sub(r",?\s*BrowserRouter\s*,?", "", code)
-    # Remove wrapping BrowserRouter tags around App
     code = re.sub(r"<BrowserRouter>\s*(<App\s*/>)\s*</BrowserRouter>", r"\1", code)
     return code, 1
 
 def autofix_missing_deps_array(code):
-    """Add [] to useEffect calls missing dependency array."""
-    # Pattern: useEffect(() => { ... }) with no , [] before closing )
-    # This is tricky to do perfectly with regex, so we use a simple heuristic
     fixed = re.sub(
         r"(useEffect\s*\(\s*(?:async\s*)?\(\s*\)\s*=>\s*\{[^}]*\}\s*)\)",
-        r"\1, [])",
-        code
+        r"\1, [])", code
     )
-    changed = 1 if fixed != code else 0
-    return fixed, changed
+    return fixed, 1 if fixed != code else 0
 
 def autofix_unsafe_error_access(code):
-    """Fix unsafe error.response.status → error.response?.status"""
     original = code
     code = code.replace("error.response.status", "error.response?.status")
     code = code.replace("error.response.data", "error.response?.data")
-    changed = 1 if code != original else 0
-    return code, changed
+    return code, 1 if code != original else 0
 
 def autofix_raw_fetch(code, file_path):
-    """
-    Fix #2: Replace raw fetch('/api/...') with proper named api.js function calls.
-    Reconstructive, not destructive — infers function name from the URL.
-    """
     if "fetch(" not in code:
         return code, 0
-
     original = code
 
     def infer_api_function(url):
-        """Guess the api.js function name from a URL like /api/rooms or /api/users/1"""
-        # Remove query strings and trailing slashes
         url = re.sub(r'\?.*', '', url).rstrip('/')
         parts = [p for p in url.split('/') if p and p != 'api']
         if not parts:
             return "apiCall"
-        resource = parts[0]  # e.g. "rooms", "messages", "users"
-        # Camel-case: rooms → getRooms, messages → getMessages
+        resource = parts[0]
         return f"get{resource.capitalize()}"
 
-    # Pattern 1: const response = await fetch('/api/...')
     def replace_fetch(m):
         url = m.group(1)
         fn = infer_api_function(url)
@@ -212,28 +163,20 @@ def autofix_raw_fetch(code, file_path):
 
     code = re.sub(
         r"await\s+fetch\(['\"]([^'\"]*\/api\/[^'\"]*)['\"][^\)]*\)",
-        replace_fetch,
-        code
+        replace_fetch, code
     )
-
-    # Pattern 2: bare fetch() without await
     code = re.sub(
         r"fetch\(['\"][^'\"]*\/api\/[^'\"]*['\"][^\)]*\)",
-        "Promise.resolve({})",
-        code
+        "Promise.resolve({})", code
     )
-
     changed = 1 if code != original else 0
 
-    # If we replaced fetch calls, inject the likely import if not present
     if changed and "from '../api'" not in code and "from '../../api'" not in code:
-        # Find the inferred function names that were inserted
         fns = re.findall(r"await (get\w+)\(\)", code)
         if fns:
-            unique_fns = list(dict.fromkeys(fns))  # deduplicate preserving order
+            unique_fns = list(dict.fromkeys(fns))
             rel = "../../api" if "components/" in file_path else "../api"
             import_line = f"import {{ {', '.join(unique_fns)} }} from '{rel}';\n"
-            # Insert after last existing import line
             lines = code.split("\n")
             last_import = max((i for i, l in enumerate(lines) if l.startswith("import ")), default=0)
             lines.insert(last_import + 1, import_line)
@@ -242,16 +185,13 @@ def autofix_raw_fetch(code, file_path):
     return code, changed
 
 def autofix_wrong_tailwind_tag(code):
-    """Fix Tailwind loaded as <link> instead of <script>."""
     new_code = re.sub(
         r'<link[^>]*cdn\.tailwindcss\.com[^>]*>',
-        '<script src="https://cdn.tailwindcss.com"></script>',
-        code
+        '<script src="https://cdn.tailwindcss.com"></script>', code
     )
     return new_code, 1 if new_code != code else 0
 
 def autofix_missing_jwt_import(code):
-    """Add create_access_token to flask_jwt_extended import in routes.py."""
     match = re.search(r"from flask_jwt_extended import ([^\n]+)", code)
     if match:
         current = match.group(1).strip()
@@ -262,79 +202,91 @@ def autofix_missing_jwt_import(code):
             )
             return code, 1
     elif "create_access_token" in code:
-        # No jwt import at all — add it
         code = "from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token\n" + code
         return code, 1
     return code, 0
 
 def autofix_missing_tailwind(code):
-    """Add Tailwind CDN to index.html if missing."""
     if "cdn.tailwindcss.com" in code:
         return code, 0
-    tailwind_tag = '    <script src="https://cdn.tailwindcss.com"></script>\n'
-    code = code.replace("</head>", tailwind_tag + "</head>")
-    return code, 1
+    return code.replace("</head>", '    <script src="https://cdn.tailwindcss.com"></script>\n</head>'), 1
 
 def autofix_missing_root_div(code):
-    """Add root div to index.html if missing."""
     if '<div id="root">' in code:
         return code, 0
-    code = code.replace("<body>", '<body>\n    <div id="root"></div>')
-    return code, 1
+    return code.replace("<body>", '<body>\n    <div id="root"></div>'), 1
+
+def autofix_phantom_backend_api(code):
+    """Remove phantom 'from backend.api import ...' lines from routes.py."""
+    original = code
+    code = re.sub(r"^from backend\.api import[^\n]*\n", "", code, flags=re.MULTILINE)
+    return code, 1 if code != original else 0
+
+def autofix_duplicate_db(code, file_path):
+    """Remove rogue db = SQLAlchemy() from app.py or models.py."""
+    original = code
+    # Remove the SQLAlchemy import if it's separate (not part of __init__.py)
+    code = re.sub(r"^from flask_sqlalchemy import SQLAlchemy\n", "", code, flags=re.MULTILINE)
+    code = re.sub(r"^db = SQLAlchemy\(\)\n", "", code, flags=re.MULTILINE)
+    # Ensure correct import exists
+    if "from backend import db" not in code and "from backend import" in code:
+        code = re.sub(r"from backend import ([^\n]+)", lambda m: f"from backend import {m.group(1)}, db" if "db" not in m.group(1) else m.group(0), code)
+    elif "from backend import" not in code:
+        code = "from backend import db\n" + code
+    return code, 1 if code != original else 0
+
+def autofix_duplicate_index_names(code):
+    """Make db.Index names unique by appending table context."""
+    seen = {}
+    lines = code.split("\n")
+    fixed_lines = []
+    changed = 0
+    for line in lines:
+        m = re.match(r"(\s*db\.Index\(')(\w+)('.*)", line)
+        if m:
+            name = m.group(2)
+            if name in seen:
+                # Make unique by appending a counter
+                seen[name] += 1
+                new_name = f"{name}_{seen[name]}"
+                line = f"{m.group(1)}{new_name}{m.group(3)}"
+                changed += 1
+            else:
+                seen[name] = 0
+        fixed_lines.append(line)
+    return "\n".join(fixed_lines), changed
 
 def apply_rule_based_fixes(file_path, code, errors):
-    """Apply all rule-based fixes that don't need LLM."""
     total_fixes = 0
     error_types = {e["type"] for e in errors}
 
-    if "css_import" in error_types:
-        code, n = autofix_css_imports(code)
-        total_fixes += n
-
-    if "react17_api" in error_types:
-        code, n = autofix_react17_api(code)
-        total_fixes += n
-
-    if "double_router" in error_types:
-        code, n = autofix_double_router(code)
-        total_fixes += n
-
-    if "missing_deps_array" in error_types:
-        code, n = autofix_missing_deps_array(code)
-        total_fixes += n
-
-    if "unsafe_error_access" in error_types:
-        code, n = autofix_unsafe_error_access(code)
-        total_fixes += n
-
-    if "raw_fetch_instead_of_api" in error_types:
-        code, n = autofix_raw_fetch(code, file_path)
-        total_fixes += n
-
-    if "wrong_tailwind_tag" in error_types:
-        code, n = autofix_wrong_tailwind_tag(code)
-        total_fixes += n
-
-    if "missing_tailwind" in error_types:
-        code, n = autofix_missing_tailwind(code)
-        total_fixes += n
-
-    if "missing_root_div" in error_types:
-        code, n = autofix_missing_root_div(code)
-        total_fixes += n
-
-    if "missing_jwt_import" in error_types or "missing_import" in error_types:
-        code, n = autofix_missing_jwt_import(code)
-        total_fixes += n
+    fixers = [
+        ("css_import",         lambda c: autofix_css_imports(c)),
+        ("react17_api",        lambda c: autofix_react17_api(c)),
+        ("double_router",      lambda c: autofix_double_router(c)),
+        ("missing_deps_array", lambda c: autofix_missing_deps_array(c)),
+        ("unsafe_error_access",lambda c: autofix_unsafe_error_access(c)),
+        ("raw_fetch_instead_of_api", lambda c: autofix_raw_fetch(c, file_path)),
+        ("wrong_tailwind_tag", lambda c: autofix_wrong_tailwind_tag(c)),
+        ("missing_tailwind",   lambda c: autofix_missing_tailwind(c)),
+        ("missing_root_div",   lambda c: autofix_missing_root_div(c)),
+        ("missing_import",     lambda c: autofix_missing_jwt_import(c)),
+        ("phantom_backend_api",lambda c: autofix_phantom_backend_api(c)),
+        ("duplicate_db_instance", lambda c: autofix_duplicate_db(c, file_path)),
+        ("duplicate_index_name",  lambda c: autofix_duplicate_index_names(c)),
+    ]
+    for err_type, fixer in fixers:
+        if err_type in error_types:
+            code, n = fixer(code)
+            total_fixes += n
 
     return code, total_fixes
 
 # ─────────────────────────────────────────────
-#  LLM-BASED FIX (for complex errors)
+#  LLM-BASED FIX
 # ─────────────────────────────────────────────
 
 def fix_with_llm(file_path, code, errors):
-    """Send broken file + errors to LLM for fixing. Injects past fix examples."""
     error_descriptions = "\n".join([
         f"- [{e['type']}] line {e.get('line', '?')}: {e['message']}"
         for e in errors
@@ -342,50 +294,103 @@ def fix_with_llm(file_path, code, errors):
 
     error_types = {e["type"] for e in errors}
 
-    # ── Learning: inject past fix examples ──
+    # Inject past fix examples
     memory_context = ""
     for err_type in error_types:
         past_fixes = recall_fix(err_type)
         if past_fixes:
             examples = "\n".join([
                 f"  Example fix for [{err_type}]:\n  BROKEN: {f['broken'][:150]}\n  FIXED: {f['fixed'][:150]}"
-                for f in past_fixes[-2:]  # last 2 examples
+                for f in past_fixes[-2:]
             ])
-            memory_context += f"\nPAST FIX PATTERNS (use these as reference):\n{examples}\n"
+            memory_context += f"\nPAST FIX PATTERNS (use as reference):\n{examples}\n"
             print(f"    🧠 Injecting {len(past_fixes)} past fix(es) for '{err_type}'")
 
-    # Type-specific extra instructions
+    # Type-specific instructions
     extra = ""
+
     if "raw_fetch_instead_of_api" in error_types:
         extra += """
 CRITICAL — RAW FETCH FIX:
-- REMOVE every single fetch() call that calls /api/... endpoints
+- REMOVE every fetch() call that hits /api/... endpoints
 - REPLACE with named imports from '../api' or '../../api'
-- Example: instead of `fetch('/api/rooms')`, use `import { getRooms } from '../api'` then call `getRooms()`
-- The axios interceptor in api.js handles JWT automatically — do NOT add Authorization headers manually
-- After your fix, there must be ZERO fetch('/api/...) calls remaining
+- The axios interceptor in api.js handles JWT automatically
+- After fix: ZERO fetch('/api/...) calls must remain
 """
-    if "missing_component" in error_types:
+
+    if "phantom_backend_api" in error_types:
         extra += """
-CRITICAL — BAD IMPORT FIX:
-- Do NOT create new files
-- Fix the import PATH in THIS file to correctly point to '../api' or the right component
-- All API functions come from '../api' (one level up from components/)
-- Example: change `from '../../api/rooms'` to `from '../api'`
+CRITICAL — PHANTOM IMPORT FIX:
+- REMOVE the line: from backend.api import ...
+- backend/api.py does NOT exist. There is no backend API module.
+- Call db and models directly in routes.py:
+  from backend.models import User, Post, ...
+  from backend import db
+- Rewrite any calls to registerUser(), loginUser() etc. as direct db operations.
 """
+
+    if "duplicate_db_instance" in error_types:
+        extra += """
+CRITICAL — DUPLICATE DB FIX:
+- REMOVE: from flask_sqlalchemy import SQLAlchemy  (if in app.py or models.py)
+- REMOVE: db = SQLAlchemy()  (if in app.py or models.py)
+- backend/__init__.py already defines db and jwt — use those.
+- For app.py: from backend import db, jwt
+- For models.py: from backend import db
+"""
+
+    # ─────────────────────────────────────────────────────────
+    # CHANGE 6: TRUNCATION FIX INSTRUCTIONS
+    # Specific step-by-step requirements for truncated files
+    # ─────────────────────────────────────────────────────────
+    if "truncated_component" in error_types:
+        component_name = os.path.basename(file_path).replace(".js", "")
+        extra += f"""
+CRITICAL — TRUNCATED COMPONENT FIX:
+This component was cut off before completion. You MUST write ALL 9 steps:
+1. import statements (react, react-router-dom, ../api)
+2. const {component_name} = () => {{
+3.   useState declarations for: data, loading, error
+4.   useEffect(() => {{ fetchData(); }}, [])  — dependency array REQUIRED
+5.   handler functions (handleSubmit, handleDelete, etc.)
+6.   return (
+7.     complete JSX with: loading spinner, error message, empty state, real content
+8.   )
+9. }};
+10. export default {component_name};
+
+Do NOT stop at step 5, 6, 7, or 8. Write all the way to 'export default {component_name};'
+Use Tailwind CSS classes only. Page wrapper: min-h-screen bg-gray-50 py-8 px-4
+"""
+
+    if "truncated_api" in error_types:
+        extra += """
+CRITICAL — TRUNCATED api.js FIX:
+api.js must contain ALL of these sections in order:
+1. import axios from 'axios';
+2. const api = axios.create({ baseURL: process.env.REACT_APP_API_URL || 'http://localhost:5000' });
+3. api.interceptors.request.use(...) — injects Authorization Bearer token from localStorage
+4. api.interceptors.response.use(...) — on 401: clear localStorage, redirect to /login
+5. export const login = async (...) => { ... }
+6. export const register = async (...) => { ... }
+7. export const getUser = async () => { ... }
+8. [one export const per remaining API endpoint]
+
+Do NOT stop after the interceptors. Write EVERY endpoint function.
+"""
+
     if "syntax_error" in error_types:
         extra += """
 CRITICAL — SYNTAX FIX:
-- Fix the syntax error exactly at the line indicated
-- Do not rewrite the whole file — only fix the broken part
+- Fix the syntax error at the indicated line
 - Return the complete file with only the syntax fixed
 """
 
-    prompt = f"""You are an expert debugger. Fix ALL the errors in this file.
+    prompt = f"""You are an expert debugger. Fix ALL errors in this file.
 
 FILE: {file_path}
 
-ERRORS TO FIX:
+ERRORS:
 {error_descriptions}
 {memory_context}
 CURRENT CODE:
@@ -396,6 +401,7 @@ RULES:
 - Fix ALL listed errors
 - Preserve all working logic
 - Tailwind CSS only — no inline styles
+- NEVER truncate the output. Write every line to completion.
 {extra}
 FIXED CODE:"""
 
@@ -409,20 +415,16 @@ FIXED CODE:"""
 # ─────────────────────────────────────────────
 
 def debug_files(files, test_result):
-    """
-    Takes files dict and test_result from tester.
-    Returns fixed files dict.
-    """
     if test_result["passed"]:
         print("\n✅ DEBUGGER: No errors to fix.")
         return files
 
     print(f"\n🔧 DEBUGGER: Fixing {test_result['error_count']} error(s)...")
 
-    # Remove rogue files that should never exist
+    # Remove rogue files at wrong paths
     ROGUE_PATHS = {
-        "frontend/api.js",         # Should be frontend/src/api.js
-        "frontend/api/rooms.js",   # Invented by debugger
+        "frontend/api.js",
+        "frontend/api/rooms.js",
         "frontend/api/messages.js",
         "frontend/api/users.js",
     }
@@ -431,19 +433,16 @@ def debug_files(files, test_result):
             del files[rogue]
             print(f"  🗑️  Removed rogue file: {rogue}")
 
-    # Group errors by file
     errors_by_file = {}
     for error in test_result["errors"]:
-        file_path = error["file"]
-        if file_path not in errors_by_file:
-            errors_by_file[file_path] = []
-        errors_by_file[file_path].append(error)
+        fp = error["file"]
+        errors_by_file.setdefault(fp, []).append(error)
 
     fixed_files = dict(files)
 
     for file_path, file_errors in errors_by_file.items():
 
-        # ── Special case: generate backend/__init__.py if missing ──
+        # Generate backend/__init__.py if missing
         if file_path == "backend/__init__.py" and file_path not in fixed_files:
             fixed_files[file_path] = (
                 "from flask_sqlalchemy import SQLAlchemy\n"
@@ -454,48 +453,51 @@ def debug_files(files, test_result):
             print(f"  ✅ Generated backend/__init__.py")
             continue
 
-        # ── Bug 2 fix: missing_component errors from api imports → fix the component, don't create new files ──
-        # If the "missing" import is actually an api function (path contains /api),
-        # don't create a new file — send the component itself to LLM to fix the import
+        # Bad api import in component — fix the component, not create files
         api_import_errors = [
             e for e in file_errors
             if e["type"] == "missing_component" and re.search(r"[./]api[./]?", e.get("message", ""))
         ]
         if api_import_errors:
-            # The component has a bad import path — LLM must fix IT, not create new files
             for err in api_import_errors:
-                print(f"  🔧 Bad api import in {file_path} — fixing import path (not creating new file)")
-            # These get handled below by LLM as part of needs_llm
+                print(f"  🔧 Bad api import path in {file_path} — fixing import (not creating new file)")
 
         if file_path not in fixed_files:
-            print(f"  ⚠️  Cannot fix {file_path} — file not in generated set")
+            print(f"  ⚠️  Cannot fix {file_path} — not in generated set")
             continue
 
         code = fixed_files[file_path]
         print(f"\n  🔧 Fixing {file_path} ({len(file_errors)} error(s))...")
 
-        # Step 1: Apply rule-based fixes first (fast, no LLM)
+        # Step 1: Rule-based fixes
         code, rule_fixes = apply_rule_based_fixes(file_path, code, file_errors)
         if rule_fixes > 0:
             print(f"    ✅ Applied {rule_fixes} rule-based fix(es)")
 
-        # Step 2: Check if complex errors remain that need LLM
+        # Step 2: LLM for complex errors
+        # ─────────────────────────────────────────────────────
+        # CHANGE 6: truncated_component and truncated_api
+        # are now in needs_llm so they get the fix instructions
+        # ─────────────────────────────────────────────────────
         needs_llm = [e for e in file_errors if e["type"] in (
             "syntax_error", "missing_component", "misplaced_db_index",
             "missing_field", "missing_dependency", "empty_file",
             "bad_import", "invalid_json", "raw_fetch_instead_of_api",
             "critical_missing_export", "critical_missing_component",
             "critical_missing_router", "critical_react18_missing",
+            "phantom_backend_api", "duplicate_db_instance",
+            "truncated_component",   # ← CHANGE 6a
+            "truncated_api",         # ← CHANGE 6b
         )]
 
         if needs_llm:
-            print(f"    🤖 Sending to LLM for {len(needs_llm)} complex error(s)...")
-            original_code = code  # save for memory comparison
+            print(f"    🤖 LLM fixing {len(needs_llm)} complex error(s)...")
+            original_code = code
             try:
                 fixed_code = fix_with_llm(file_path, code, needs_llm)
                 print(f"    ✅ LLM fix applied")
 
-                # ── Bug 3 fix: post-fix validation for raw_fetch ──
+                # Post-fix validation for raw_fetch
                 if any(e["type"] == "raw_fetch_instead_of_api" for e in needs_llm):
                     if "fetch(" in fixed_code and "/api/" in fixed_code:
                         print(f"    ⚠️  LLM didn't remove fetch() — applying forced rule fix...")
@@ -503,16 +505,15 @@ def debug_files(files, test_result):
                         if n:
                             print(f"    ✅ Force-removed raw fetch() calls")
 
-                # ── Learning: save successful fix patterns to memory ──
+                # Save successful fix patterns
                 for err in needs_llm:
                     err_type = err["type"]
-                    # Extract a snippet around the error line for pattern matching
                     line_num = err.get("line")
                     if line_num:
-                        lines = original_code.split("\n")
+                        orig_lines = original_code.split("\n")
                         start = max(0, line_num - 2)
-                        end = min(len(lines), line_num + 2)
-                        broken_snippet = "\n".join(lines[start:end])
+                        end = min(len(orig_lines), line_num + 2)
+                        broken_snippet = "\n".join(orig_lines[start:end])
                         fixed_lines = fixed_code.split("\n")
                         fixed_snippet = "\n".join(fixed_lines[start:end]) if len(fixed_lines) > start else fixed_code[:200]
                     else:
@@ -529,16 +530,8 @@ def debug_files(files, test_result):
 
     return fixed_files
 
-def run_debug_loop(files, tester_fn, max_retries=MAX_RETRIES):
-    """
-    Full debug loop:
-    1. Run tester
-    2. If errors found, run debugger
-    3. Re-run tester
-    4. Repeat up to max_retries times
 
-    Returns (final_files, final_test_result, attempts_taken)
-    """
+def run_debug_loop(files, tester_fn, max_retries=MAX_RETRIES):
     from agent.tester import run_tests, format_errors_for_log
 
     current_files = files
@@ -559,11 +552,9 @@ def run_debug_loop(files, tester_fn, max_retries=MAX_RETRIES):
         if attempt < max_retries - 1:
             print(f"\n🔧 Running debugger (attempt {attempt + 1}/{max_retries - 1})...")
             current_files = debug_files(current_files, test_result)
-        
+
         attempt += 1
 
-
-    # Final test after last fix attempt
     final_result = run_tests(current_files)
     format_errors_for_log(final_result)
 
