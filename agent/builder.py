@@ -257,6 +257,13 @@ CORRECT PATTERNS:
 ✅ Errors: error.response?.data?.message || error.message || 'Something went wrong'
 ✅ useEffect: ALWAYS with dependency array [].
 
+CRITICAL — AUTH FIELD FORMAT:
+- Login form MUST use 'username' and 'password' fields ONLY.
+- DO NOT use 'email' as the login credential field.
+- Backend login endpoint expects: { username, password }
+- api.js loginUser function must send: { username, password } NOT { email, password }
+- Register form uses: { username, email, password } (email is only for registration, not login)
+
 For frontend/src/index.js:
 - React 18 createRoot. No BrowserRouter here. Only imports: react, react-dom/client, ./index.css, ./App.
 
@@ -334,6 +341,15 @@ def build_file(file_info, blueprint, project_path, existing_files={}):
 
     # ── Template injection — guaranteed-correct skeletons ──
     SKELETON_TEMPLATES = {
+        # Fix: .env.example is always the same — never waste LLM retries on it
+        ".env.example": (
+            "DATABASE_URL=postgresql://user:password@localhost/dbname\n"
+            "SECRET_KEY=your-secret-key-here\n"
+            "JWT_SECRET_KEY=your-jwt-secret-here\n"
+            "DEBUG=True\n"
+            "FLASK_ENV=development\n"
+            "REACT_APP_API_URL=http://localhost:5000\n"
+        ),
         "backend/__init__.py": (
             "from flask_sqlalchemy import SQLAlchemy\n"
             "from flask_jwt_extended import JWTManager\n\n"

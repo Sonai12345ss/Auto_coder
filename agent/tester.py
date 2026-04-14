@@ -211,17 +211,38 @@ def test_js_syntax(file_path, code):
                 })
 
     # ─────────────────────────────────────────────────────────
-    # CHANGE 5a: TRUNCATED COMPONENT DETECTION
-    # Catches components cut off before export default or return()
+    # TRUNCATED COMPONENT DETECTION (structural + semantic)
+    # Catches components cut off syntactically OR logically
     # ─────────────────────────────────────────────────────────
     if "components/" in file_path and file_path.endswith(".js"):
         truncation_issues = []
+        component_name = os.path.basename(file_path).replace(".js", "")
+
+        # Structural: file cut off before completion
         if "export default" not in code:
             truncation_issues.append("missing 'export default'")
         if "return (" not in code and "return(" not in code:
             truncation_issues.append("missing 'return (' — JSX block absent")
+
+        # Semantic: has imports/hooks but no JSX output (model stopped mid-function)
+        has_imports = "import " in code
+        has_hooks = "useState" in code or "useEffect" in code
+        has_jsx = "<div" in code or "<span" in code or "<button" in code or "<form" in code or "<p " in code
+        if has_imports and has_hooks and not has_jsx:
+            truncation_issues.append("has hooks but no JSX elements — model stopped before return()")
+
+        # Semantic: unused import is a truncation signal (model started, then stopped)
+        import_names = re.findall(r"^import\s+(?:React,\s*)?\{\s*([^}]+)\}", code, re.MULTILINE)
+        all_imported = []
+        for grp in import_names:
+            all_imported.extend([n.strip() for n in grp.split(",")])
+        # Check if useState imported but no useState( usage (besides the import line itself)
+        if "useState" in all_imported:
+            usage_count = code.count("useState(")
+            if usage_count == 0:
+                truncation_issues.append("useState imported but never called — component body is missing")
+
         if truncation_issues:
-            component_name = os.path.basename(file_path).replace(".js", "")
             errors.append({
                 "file": file_path,
                 "type": "truncated_component",
@@ -359,6 +380,32 @@ def check_cross_file_consistency(files):
     api_code = files.get("frontend/src/api.js", "")
     if api_code:
         api_exports = set(re.findall(r"^export\s+(?:const|async function|function)\s+(\w+)", api_code, re.MULTILINE))
+
+    # Fix 1: App.js route count vs component count
+    # Catches App.js that's syntactically valid but logically truncated (missing routes)
+    app_js_code = files.get("frontend/src/App.js", "")
+    if app_js_code:
+        route_count = len(re.findall(r"<Route\s", app_js_code))
+        # Count real page components (exclude layout/guard components)
+        EXCLUDED_COMPONENTS = {"PrivateRoute", "Navbar", "Footer", "Layout", "App"}
+        page_components = sum(
+            1 for p in file_paths
+            if "components/" in p and p.endswith(".js")
+            and not any(x in p for x in EXCLUDED_COMPONENTS)
+        )
+        # If routes < components - 3, App.js is almost certainly truncated
+        if page_components > 2 and route_count < max(2, page_components - 3):
+            errors.append({
+                "file": "frontend/src/App.js",
+                "type": "truncated_component",
+                "message": (
+                    f"App.js only has {route_count} <Route> elements but "
+                    f"{page_components} page components exist. App.js was likely "
+                    f"truncated — it must include routes for ALL components including "
+                    f"ProductDetail, Cart, OrderForm, etc."
+                ),
+                "line": None,
+            })
 
     # Cross-file import check
     for path, code in files.items():
