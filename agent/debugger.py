@@ -19,6 +19,24 @@ MAX_RETRIES = 3
 
 MEMORY_FILE = "sandbox/debugger_memory.json"
 
+# ─────────────────────────────────────────────
+# FIX 2: PRIVATEROUTE TEMPLATE
+# PrivateRoute must NEVER be LLM-rebuilt.
+# This is the canonical 3-line guard pattern
+# using React Router v6 Outlet.
+# ─────────────────────────────────────────────
+PRIVATEROUTE_TEMPLATE = """\
+import React from 'react';
+import { Navigate, Outlet } from 'react-router-dom';
+
+const PrivateRoute = () => {
+  const token = localStorage.getItem('token');
+  return token ? <Outlet /> : <Navigate to="/login" replace />;
+};
+
+export default PrivateRoute;
+"""
+
 def _load_memory():
     try:
         if os.path.exists(MEMORY_FILE):
@@ -225,10 +243,8 @@ def autofix_phantom_backend_api(code):
 def autofix_duplicate_db(code, file_path):
     """Remove rogue db = SQLAlchemy() from app.py or models.py."""
     original = code
-    # Remove the SQLAlchemy import if it's separate (not part of __init__.py)
     code = re.sub(r"^from flask_sqlalchemy import SQLAlchemy\n", "", code, flags=re.MULTILINE)
     code = re.sub(r"^db = SQLAlchemy\(\)\n", "", code, flags=re.MULTILINE)
-    # Ensure correct import exists
     if "from backend import db" not in code and "from backend import" in code:
         code = re.sub(r"from backend import ([^\n]+)", lambda m: f"from backend import {m.group(1)}, db" if "db" not in m.group(1) else m.group(0), code)
     elif "from backend import" not in code:
@@ -246,7 +262,6 @@ def autofix_duplicate_index_names(code):
         if m:
             name = m.group(2)
             if name in seen:
-                # Make unique by appending a counter
                 seen[name] += 1
                 new_name = f"{name}_{seen[name]}"
                 line = f"{m.group(1)}{new_name}{m.group(3)}"
@@ -255,6 +270,22 @@ def autofix_duplicate_index_names(code):
                 seen[name] = 0
         fixed_lines.append(line)
     return "\n".join(fixed_lines), changed
+
+# ─────────────────────────────────────────────
+# FIX 1: MISSING PROXY AUTOFIX
+# Adds "proxy": "http://localhost:5000" to
+# package.json when it's absent.
+# ─────────────────────────────────────────────
+def autofix_missing_proxy(code):
+    """Add proxy field to package.json if missing."""
+    try:
+        pkg = json.loads(code)
+        if "proxy" not in pkg:
+            pkg["proxy"] = "http://localhost:5000"
+            return json.dumps(pkg, indent=2), 1
+    except Exception:
+        pass
+    return code, 0
 
 def apply_rule_based_fixes(file_path, code, errors):
     total_fixes = 0
@@ -274,6 +305,8 @@ def apply_rule_based_fixes(file_path, code, errors):
         ("phantom_backend_api",lambda c: autofix_phantom_backend_api(c)),
         ("duplicate_db_instance", lambda c: autofix_duplicate_db(c, file_path)),
         ("duplicate_index_name",  lambda c: autofix_duplicate_index_names(c)),
+        # FIX 1: missing_proxy now has a rule-based autofix
+        ("missing_proxy",      lambda c: autofix_missing_proxy(c)),
     ]
     for err_type, fixer in fixers:
         if err_type in error_types:
@@ -339,10 +372,6 @@ CRITICAL — DUPLICATE DB FIX:
 - For models.py: from backend import db
 """
 
-    # ─────────────────────────────────────────────────────────
-    # CHANGE 6: TRUNCATION FIX INSTRUCTIONS
-    # Specific step-by-step requirements for truncated files
-    # ─────────────────────────────────────────────────────────
     if "truncated_component" in error_types:
         component_name = os.path.basename(file_path).replace(".js", "")
         extra += f"""
@@ -377,6 +406,10 @@ api.js must contain ALL of these sections in order:
 8. [one export const per remaining API endpoint]
 
 Do NOT stop after the interceptors. Write EVERY endpoint function.
+
+CRITICAL — TOKEN KEY:
+When saving JWT from login response, use response.data.token NOT response.data.access_token.
+The backend returns { "token": "...", "user": {...} }.
 """
 
     if "syntax_error" in error_types:
@@ -384,6 +417,25 @@ Do NOT stop after the interceptors. Write EVERY endpoint function.
 CRITICAL — SYNTAX FIX:
 - Fix the syntax error at the indicated line
 - Return the complete file with only the syntax fixed
+"""
+
+    # ─────────────────────────────────────────────
+    # FIX 3: TOKEN KEY MISMATCH
+    # Inject token-key correction hint for any
+    # file that touches loginUser / login response.
+    # ─────────────────────────────────────────────
+    if file_path == "frontend/src/api.js" or (
+        "login" in file_path.lower() and file_path.endswith(".js")
+    ):
+        extra += """
+IMPORTANT — JWT TOKEN KEY:
+- The backend /api/login route returns: { "token": "...", "user": {...} }
+- When saving the JWT to localStorage, use: response.data.token
+- Do NOT use response.data.access_token — that key does not exist in the response.
+- Correct pattern:
+    if (response.data.token) {
+      localStorage.setItem('token', response.data.token);
+    }
 """
 
     prompt = f"""You are an expert debugger. Fix ALL errors in this file.
@@ -453,6 +505,16 @@ def debug_files(files, test_result):
             print(f"  ✅ Generated backend/__init__.py")
             continue
 
+        # ─────────────────────────────────────────────
+        # FIX 2: PRIVATEROUTE HARDGUARD
+        # PrivateRoute.js must NEVER go to the LLM.
+        # Always restore from the canonical template.
+        # ─────────────────────────────────────────────
+        if file_path == "frontend/src/components/PrivateRoute.js":
+            fixed_files[file_path] = PRIVATEROUTE_TEMPLATE
+            print(f"  ✅ Restored PrivateRoute.js from canonical template (LLM bypassed)")
+            continue
+
         # Bad api import in component — fix the component, not create files
         api_import_errors = [
             e for e in file_errors
@@ -475,10 +537,6 @@ def debug_files(files, test_result):
             print(f"    ✅ Applied {rule_fixes} rule-based fix(es)")
 
         # Step 2: LLM for complex errors
-        # ─────────────────────────────────────────────────────
-        # CHANGE 6: truncated_component and truncated_api
-        # are now in needs_llm so they get the fix instructions
-        # ─────────────────────────────────────────────────────
         needs_llm = [e for e in file_errors if e["type"] in (
             "syntax_error", "missing_component", "misplaced_db_index",
             "missing_field", "missing_dependency", "empty_file",
@@ -486,8 +544,8 @@ def debug_files(files, test_result):
             "critical_missing_export", "critical_missing_component",
             "critical_missing_router", "critical_react18_missing",
             "phantom_backend_api", "duplicate_db_instance",
-            "truncated_component",   # ← CHANGE 6a
-            "truncated_api",         # ← CHANGE 6b
+            "truncated_component",
+            "truncated_api",
         )]
 
         if needs_llm:
