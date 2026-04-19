@@ -1,6 +1,8 @@
 import os
+import re
 import time
 import json
+import hashlib
 import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -10,45 +12,142 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from agent.tools import write_file, read_file, execute_python_code
 
-MEMORY_ENABLED = False
-def query_experience(desc): return ""
-def add_experience(desc, code, error=None): pass
-
 load_dotenv()
 
 # ═══════════════════════════════════════════════════════════════
-# GLOBAL RATE LIMITER
+# REAL MEMORY SYSTEM
+# SHORT-TERM: per-build session | LONG-TERM: persisted to disk
 # ═══════════════════════════════════════════════════════════════
-_RATE_LIMIT_LOCK = threading.Lock()
-_LAST_REQUEST_TIME = 0
-_MIN_INTERVAL = 2.0
 
-def _throttle():
-    global _LAST_REQUEST_TIME
-    with _RATE_LIMIT_LOCK:
-        now = time.time()
-        wait = _MIN_INTERVAL - (now - _LAST_REQUEST_TIME)
-        if wait > 0:
-            time.sleep(wait)
-        _LAST_REQUEST_TIME = time.time()
+MEMORY_FILE = "sandbox/builder_memory.json"
+MEMORY_ENABLED = True
+
+_session_memory = {
+    "provider_wins": defaultdict(int),
+    "provider_latency": defaultdict(list),
+    "fix_patterns": {},
+    "failed_patterns": set(),
+}
+_session_lock = threading.Lock()
+
+def _load_long_term_memory():
+    try:
+        if os.path.exists(MEMORY_FILE):
+            return json.loads(open(MEMORY_FILE).read())
+    except Exception:
+        pass
+    return {"fix_patterns": {}, "provider_stats": {}, "build_count": 0}
+
+def _save_long_term_memory(mem):
+    try:
+        os.makedirs(os.path.dirname(MEMORY_FILE), exist_ok=True)
+        with open(MEMORY_FILE, "w") as f:
+            json.dump(mem, f, indent=2)
+    except Exception:
+        pass
+
+def remember_fix(error_type, file_ext, broken_snippet, fixed_snippet):
+    if not broken_snippet or not fixed_snippet or broken_snippet == fixed_snippet:
+        return
+    key = f"{error_type}|{file_ext}"
+    mem = _load_long_term_memory()
+    existing = mem.setdefault("fix_patterns", {}).get(key, [])
+    existing = existing[-4:] + [{"broken": broken_snippet[:300], "fixed": fixed_snippet[:300], "ts": datetime.now().isoformat()}]
+    mem["fix_patterns"][key] = existing
+    _save_long_term_memory(mem)
+
+def recall_fixes(error_type, file_ext):
+    key = f"{error_type}|{file_ext}"
+    return _load_long_term_memory().get("fix_patterns", {}).get(key, [])
+
+def record_provider_result(provider_name, success, latency_ms):
+    with _session_lock:
+        if success:
+            _session_memory["provider_wins"][provider_name] += 1
+        _session_memory["provider_latency"][provider_name].append(latency_ms)
+    mem = _load_long_term_memory()
+    p = mem.setdefault("provider_stats", {}).setdefault(provider_name, {"success": 0, "fail": 0, "latency_sum": 0, "calls": 0})
+    p["calls"] += 1
+    p["latency_sum"] += latency_ms
+    if success:
+        p["success"] += 1
+    else:
+        p["fail"] += 1
+    _save_long_term_memory(mem)
+
+def query_experience(description): return []
+def add_experience(description, code, error=None): pass
+
 
 # ═══════════════════════════════════════════════════════════════
-# PROVIDER HEALTH TRACKER
+# FILE CACHE — avoid rebuilding identical files within a session
 # ═══════════════════════════════════════════════════════════════
+
+_file_cache = {}
+_cache_lock = threading.Lock()
+
+def _make_cache_key(file_description, dependency_codes):
+    combined = file_description + "".join(sorted(dependency_codes))
+    return hashlib.sha256(combined.encode()).hexdigest()[:16]
+
+def cache_get(key):
+    with _cache_lock:
+        return _file_cache.get(key)
+
+def cache_set(key, code):
+    with _cache_lock:
+        _file_cache[key] = code
+
+
+# ═══════════════════════════════════════════════════════════════
+# PER-PROVIDER RATE LIMITER
+# Gemini 2.5s gap, Groq 1.0s gap — each provider independent
+# ═══════════════════════════════════════════════════════════════
+
+class PerProviderRateLimiter:
+    def __init__(self, min_interval):
+        self.min_interval = min_interval
+        self.last_time = 0.0
+        self.lock = threading.Lock()
+
+    def wait(self):
+        with self.lock:
+            now = time.time()
+            gap = self.min_interval - (now - self.last_time)
+            if gap > 0:
+                time.sleep(gap)
+            self.last_time = time.time()
+
+_provider_limiters = {}
+_limiters_lock = threading.Lock()
+
+def _get_limiter(provider_name):
+    with _limiters_lock:
+        if provider_name not in _provider_limiters:
+            interval = 2.5 if "gemini" in provider_name.lower() else 1.0
+            _provider_limiters[provider_name] = PerProviderRateLimiter(interval)
+        return _provider_limiters[provider_name]
+
+
+# ═══════════════════════════════════════════════════════════════
+# SMART PROVIDER SCORING
+# Ranked by: success rate (60%) + latency (40%) - fail penalty
+# ═══════════════════════════════════════════════════════════════
+
 class ProviderHealth:
     def __init__(self):
-        self.failures = defaultdict(int)
+        self.consecutive_fails = defaultdict(int)
         self.blocked_until = defaultdict(lambda: datetime.min)
         self._lock = threading.Lock()
 
     def block(self, name, seconds=90):
         with self._lock:
-            self.failures[name] += 1
+            self.consecutive_fails[name] += 1
             self.blocked_until[name] = datetime.now() + timedelta(seconds=seconds)
 
     def ok(self, name):
         with self._lock:
-            self.failures[name] = 0
+            self.consecutive_fails[name] = 0
             self.blocked_until[name] = datetime.min
 
     def is_available(self, name):
@@ -57,10 +156,33 @@ class ProviderHealth:
 
     def reset_all(self):
         with self._lock:
-            self.failures.clear()
+            self.consecutive_fails.clear()
             self.blocked_until.clear()
 
 _health = ProviderHealth()
+
+def _score_provider(provider_name):
+    stats = _load_long_term_memory().get("provider_stats", {}).get(provider_name)
+    if not stats or stats["calls"] == 0:
+        base_score = 0.5
+    else:
+        success_rate = stats["success"] / stats["calls"]
+        avg_latency = stats["latency_sum"] / stats["calls"]
+        latency_score = max(0.0, 1.0 - (avg_latency - 500) / 4500)
+        base_score = (success_rate * 0.6) + (latency_score * 0.4)
+    return base_score - (_health.consecutive_fails.get(provider_name, 0) * 0.15)
+
+def _ranked_providers(provider_list):
+    available = [p for p in provider_list if _health.is_available(p["name"])]
+    if not available:
+        _health.reset_all()
+        available = provider_list
+    return sorted(available, key=lambda p: _score_provider(p["name"]), reverse=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+# SPECIALIZED MODEL POOLS PER TASK TYPE
+# ═══════════════════════════════════════════════════════════════
 
 groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 groq2   = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
@@ -68,121 +190,134 @@ groq3   = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
 gemini1 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY", ""))
 gemini2 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_2", ""))
 gemini3 = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_3", ""))
-openrouter  = OpenAI(base_url="https://openrouter.ai/api/v1",      api_key=os.environ.get("OPENROUTER_API_KEY", ""))
-doubleword  = OpenAI(base_url="https://api.doubleword.ai/v1",       api_key=os.environ.get("DOUBLEWORD_API_KEY", ""))
+openrouter = OpenAI(base_url="https://openrouter.ai/api/v1",   api_key=os.environ.get("OPENROUTER_API_KEY", ""))
+doubleword = OpenAI(base_url="https://api.doubleword.ai/v1",   api_key=os.environ.get("DOUBLEWORD_API_KEY", ""))
 
-PROVIDERS = [
-    {"name": "Gemini-1 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.0-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.0-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-1 / llama-3.3-70b",       "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-2 / llama-3.3-70b",       "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-3 / llama-3.3-70b",       "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-1 / llama-3.1-8b",        "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-2 / llama-3.1-8b",        "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Groq-3 / llama-3.1-8b",        "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.1-8b-instant",             messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "OpenRouter / llama-3.3-70b",   "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "OpenRouter / gemma-3-27b",     "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free",  messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-1 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-flash",  "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-1 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-pro",    "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Doubleword / Qwen3.5-35B",     "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-35B-A3B-FP8",   messages=msgs, temperature=0.15, max_tokens=mt)},
-    {"name": "Doubleword / Qwen3.5-397B",    "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.15, max_tokens=mt)},
+BACKEND_PROVIDERS = [
+    {"name": "Gemini-1 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",   messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",   messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro",   messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Groq-1 / llama-3.3-70b",      "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Groq-2 / llama-3.3-70b",      "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Groq-3 / llama-3.3-70b",      "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Doubleword / Qwen3.5-397B",   "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.1, max_tokens=mt)},
 ]
 
 UI_PROVIDERS = [
-    {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash",               messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-1 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-2 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Gemini-3 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro",       messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Groq-1 / llama-3.3-70b",      "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Groq-2 / llama-3.3-70b",      "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.2, max_tokens=mt)},
-    {"name": "Groq-3 / llama-3.3-70b",      "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile",          messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-pro",   messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-pro",   messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-pro",   "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-pro",   messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Groq-1 / llama-3.3-70b",      "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Groq-2 / llama-3.3-70b",      "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.2, max_tokens=mt)},
+    {"name": "Groq-3 / llama-3.3-70b",      "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.2, max_tokens=mt)},
     {"name": "Doubleword / Qwen3.5-397B",   "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.2, max_tokens=mt)},
 ]
 
-# ─────────────────────────────────────────────
-# CHANGE 1: TOKEN OPTIMIZER — increased sizes
-# components: 2500→3500 | routes: 2000→2500 | api.js: 1500→2000
-# ─────────────────────────────────────────────
+DEBUG_PROVIDERS = [
+    {"name": "Groq-1 / llama-3.3-70b",      "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.05, max_tokens=mt)},
+    {"name": "Groq-2 / llama-3.3-70b",      "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.05, max_tokens=mt)},
+    {"name": "Groq-3 / llama-3.3-70b",      "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.3-70b-versatile", messages=msgs, temperature=0.05, max_tokens=mt)},
+    {"name": "Doubleword / Qwen3.5-35B",    "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-35B-A3B-FP8",  messages=msgs, temperature=0.05, max_tokens=mt)},
+    {"name": "Doubleword / Qwen3.5-397B",   "call": lambda msgs, mt: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8", messages=msgs, temperature=0.05, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.0-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.05, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.0-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.05, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.0-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.0-flash", messages=msgs, temperature=0.05, max_tokens=mt)},
+    {"name": "OpenRouter / llama-3.3-70b",  "call": lambda msgs, mt: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=msgs, temperature=0.05, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.5-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.05, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.5-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.05, max_tokens=mt)},
+    {"name": "Gemini-3 / gemini-2.5-flash", "call": lambda msgs, mt: gemini3.chat.completions.create(model="gemini-2.5-flash", messages=msgs, temperature=0.05, max_tokens=mt)},
+]
+
+FAST_PROVIDERS = [
+    {"name": "Groq-1 / llama-3.1-8b",       "call": lambda msgs, mt: groq1.chat.completions.create(model="llama-3.1-8b-instant", messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Groq-2 / llama-3.1-8b",       "call": lambda msgs, mt: groq2.chat.completions.create(model="llama-3.1-8b-instant", messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Groq-3 / llama-3.1-8b",       "call": lambda msgs, mt: groq3.chat.completions.create(model="llama-3.1-8b-instant", messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Gemini-1 / gemini-2.0-flash", "call": lambda msgs, mt: gemini1.chat.completions.create(model="gemini-2.0-flash",   messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "Gemini-2 / gemini-2.0-flash", "call": lambda msgs, mt: gemini2.chat.completions.create(model="gemini-2.0-flash",   messages=msgs, temperature=0.1, max_tokens=mt)},
+    {"name": "OpenRouter / gemma-3-27b",    "call": lambda msgs, mt: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free", messages=msgs, temperature=0.1, max_tokens=mt)},
+]
+
+TASK_PROVIDERS = {
+    "backend": BACKEND_PROVIDERS,
+    "ui":      UI_PROVIDERS,
+    "debug":   DEBUG_PROVIDERS,
+    "fast":    FAST_PROVIDERS,
+}
+
+
 def get_optimal_tokens(file_path):
-    if file_path.endswith(".env.example"):
-        return 600
-    elif file_path.endswith("config.py"):
-        return 800
-    elif file_path.endswith("index.css"):
-        return 600
-    elif file_path.endswith("package.json"):
-        return 800
-    elif file_path.endswith("index.html"):
-        return 1000
-    elif "components/" in file_path and file_path.endswith((".js", ".jsx")):
-        return 3500  # ↑ was 2500 — more room for full Tailwind UI patterns
-    elif "routes.py" in file_path:
-        return 2500  # ↑ was 2000 — full CRUD + pagination without truncation
-    elif "App.js" in file_path:
-        return 1800
-    elif "api.js" in file_path:
-        return 2000  # ↑ was 1500 — all endpoints + interceptors fit cleanly
-    elif "models.py" in file_path:
-        return 1800
-    elif file_path.endswith(".py"):
-        return 1500
-    elif file_path.endswith("index.js"):
-        return 600
-    else:
-        return 1200
+    if file_path.endswith(".env.example"):          return 600
+    elif file_path.endswith("config.py"):           return 800
+    elif file_path.endswith("index.css"):           return 600
+    elif file_path.endswith("package.json"):        return 800
+    elif file_path.endswith("index.html"):          return 1000
+    elif "components/" in file_path and file_path.endswith((".js", ".jsx")): return 3500
+    elif "routes.py" in file_path:                 return 2500
+    elif "App.js" in file_path:                    return 1800
+    elif "api.js" in file_path:                    return 2000
+    elif "models.py" in file_path:                 return 1800
+    elif file_path.endswith(".py"):                return 1500
+    elif file_path.endswith("index.js"):           return 600
+    else:                                          return 1200
 
 
-def call_llm(messages, max_tokens=4096, task_type="general"):
-    provider_list = UI_PROVIDERS if task_type == "ui" else PROVIDERS
+def _get_task_type(file_path):
+    if file_path in (".env.example", "frontend/src/index.js",
+                     "frontend/package.json", "frontend/public/index.html", "backend/config.py"):
+        return "fast"
+    elif file_path.startswith("backend/") and file_path.endswith(".py"):
+        return "backend"
+    elif file_path.startswith("frontend/") and file_path.endswith((".js", ".jsx", ".css", ".html")):
+        return "ui"
+    return "backend"
+
+
+def call_llm(messages, max_tokens=4096, task_type="backend"):
+    provider_list = TASK_PROVIDERS.get(task_type, BACKEND_PROVIDERS)
+    ranked = _ranked_providers(provider_list)
     last_error = None
 
-    available = [p for p in provider_list if _health.is_available(p['name'])]
-    if not available:
-        print("  ⚠️  All providers in cooldown — resetting and retrying...")
-        _health.reset_all()
-        available = provider_list
-
-    for provider in available:
+    for provider in ranked:
+        name = provider["name"]
+        t0 = time.time()
         try:
-            print(f"  🤖 Using {provider['name']}...")
-            _throttle()
+            print(f"  🤖 [{task_type}] Using {name} (score: {_score_provider(name):.2f})...")
+            _get_limiter(name).wait()
             response = provider["call"](messages, max_tokens)
-            _health.ok(provider['name'])
+            latency_ms = (time.time() - t0) * 1000
+            _health.ok(name)
+            record_provider_result(name, success=True, latency_ms=latency_ms)
+            print(f"  ✅ {name} responded in {latency_ms:.0f}ms")
             return response
-
         except Exception as e:
+            latency_ms = (time.time() - t0) * 1000
+            record_provider_result(name, success=False, latency_ms=latency_ms)
             err = str(e).lower()
             if any(x in err for x in ["rate_limit", "rate-limit", "429", "quota", "503", "402", "temporarily", "overloaded", "upstream"]):
-                cooldown = 120 if "gemini" in provider['name'].lower() else 60
-                _health.block(provider['name'], seconds=cooldown)
-                print(f"  ⚠️  {provider['name']} rate limited (cooldown {cooldown}s), skipping...")
+                cooldown = 120 if "gemini" in name.lower() else 60
+                _health.block(name, seconds=cooldown)
+                print(f"  ⚠️  {name} rate limited (cooldown {cooldown}s), skipping...")
                 last_error = e
-                continue
             elif any(x in err for x in ["decommission", "deprecated", "no longer supported", "invalid model"]):
-                _health.block(provider['name'], seconds=600)
-                print(f"  ⚠️  {provider['name']} model unavailable, skipping...")
+                _health.block(name, seconds=600)
+                print(f"  ⚠️  {name} model unavailable, skipping...")
                 last_error = e
-                continue
             else:
-                print(f"  ⚠️  {provider['name']} error: {str(e)[:80]}, trying next...")
+                print(f"  ⚠️  {name} error: {str(e)[:80]}, trying next...")
                 last_error = e
-                continue
+            continue
 
-    raise Exception(f"All providers failed. Last error: {last_error}")
+    raise Exception(f"All providers failed for task_type={task_type}. Last error: {last_error}")
 
 
 # ═══════════════════════════════════════════════════════════════
-# CHANGE 2: SPLIT PROMPTS
-# BACKEND_PROMPT: Flask/Python only — no UI rules, ~3200 tokens
-# FRONTEND_PROMPT: React/Tailwind only — no Flask rules, ~3500 tokens
-# Previously a single BUILDER_PROMPT at ~6400 tokens input each call
+# BACKEND PROMPT
 # ═══════════════════════════════════════════════════════════════
 
 BACKEND_PROMPT = """
@@ -198,6 +333,8 @@ ABSOLUTE RULES:
 ❌ db = SQLAlchemy() in app.py or models.py — ONLY backend/__init__.py defines db and jwt.
 ❌ Duplicate db.Index() names — every index name must be globally unique across all models.
 ❌ db.Index() inside a class body — ALWAYS place OUTSIDE and AFTER class definitions.
+❌ user.password == data['password'] — NEVER compare passwords with ==. Use check_password().
+❌ User(password=data['password']) — NEVER store raw passwords. Use set_password() after creation.
 
 For backend/__init__.py:
 - ONLY: db = SQLAlchemy() and jwt = JWTManager() — nothing else.
@@ -210,18 +347,36 @@ For backend/config.py:
 For backend/models.py:
 - from backend import db  (NEVER redefine db here)
 - db.relationship() for EVERY foreign key.
-- password hashing via werkzeug.
+- password hashing via werkzeug: set_password() and check_password() on User model.
 - created_at on every model, to_dict() with .isoformat() for datetimes.
-- db.Index() OUTSIDE and AFTER class definitions. Names MUST be unique: ix_post_user_id not ix_user_id.
+- db.Index() OUTSIDE and AFTER class definitions. Names MUST be unique.
 - Every model: id (PK), created_at, to_dict(), __repr__().
-- NEVER store plain text passwords.
+- FIX: ALWAYS define __tablename__ = 'table_name' explicitly on EVERY model.
+  Never rely on SQLAlchemy defaults — they cause FK reference mismatches.
+  class User        → __tablename__ = 'users'
+  class OrderItem   → __tablename__ = 'order_items'
+  class BlogPost    → __tablename__ = 'blog_posts'
+  FK references MUST match __tablename__ exactly: db.ForeignKey('users.id'), db.ForeignKey('order_items.id')
 
 For backend/routes.py:
 - from backend import db (NEVER from backend.api import anything)
 - from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_token
-- Every POST/PUT validates required fields → 400 with clear message if missing.
-- Login: accepts username + password, returns {"token": create_access_token(identity=user.id), "user": user.to_dict()}
-- All GET list endpoints: ?page=1&per_page=20 with .paginate(), return {"items":[...], "total":n, "page":n, "pages":n}
+
+REGISTRATION — correct pattern (MANDATORY):
+  new_user = User(username=data['username'], email=data['email'])
+  new_user.set_password(data['password'])
+  db.session.add(new_user)
+  db.session.commit()
+
+LOGIN — correct pattern (MANDATORY):
+  user = User.query.filter_by(username=data['username']).first()
+  if user and user.check_password(data['password']):
+      token = create_access_token(identity=user.id)
+      return jsonify({'token': token, 'user': user.to_dict()}), 200
+
+- Login returns: {"token": ..., "user": ...} — key MUST be "token" not "access_token".
+- Every POST/PUT validates required fields → 400 if missing.
+- All GET list endpoints: paginate(), return {"items":[...], "total":n, "page":n, "pages":n}
 - Wrap all db writes in try/except with db.session.rollback() on error.
 - @jwt_required() on all write endpoints.
 
@@ -231,8 +386,11 @@ For backend/app.py:
 - Extensions: db.init_app(app), jwt.init_app(app), CORS(app), Migrate(app, db)
 - Register blueprint from backend.routes.
 - /health route → {"status": "ok"}
-- from flask import Flask, jsonify
 """
+
+# ═══════════════════════════════════════════════════════════════
+# FRONTEND PROMPT
+# ═══════════════════════════════════════════════════════════════
 
 FRONTEND_PROMPT = """
 You are a senior React engineer. Write production-grade frontend code using Tailwind CSS.
@@ -248,90 +406,103 @@ ABSOLUTE RULES:
 ❌ ReactDOM.render() — NEVER React 17. Use ReactDOM.createRoot() only.
 ❌ <BrowserRouter> in index.js — BrowserRouter lives in App.js only.
 ❌ style={{ ... }} — NEVER inline styles. Tailwind className only.
-❌ TODO / placeholder — NEVER stubs.
-❌ import LoadingSpinner / import ErrorAlert — NEVER import components not in blueprint.
+❌ response.data.access_token — NEVER. Backend returns {"token": ...}. Use response.data.token.
+❌ import api from '../api' — NEVER default import. api.js has no default export.
+   Correct: import { getProducts, login } from '../api'
 
 CORRECT PATTERNS:
-✅ API calls: import { getRooms } from '../api'; then call in useEffect.
-✅ React 18: const root = ReactDOM.createRoot(document.getElementById('root')); root.render(...)
+✅ API calls: import { getProducts } from '../api'; call in useEffect with [].
+✅ React 18: const root = ReactDOM.createRoot(...); root.render(...)
 ✅ Errors: error.response?.data?.message || error.message || 'Something went wrong'
-✅ useEffect: ALWAYS with dependency array [].
+✅ JWT save: localStorage.setItem('token', response.data.token)
 
-CRITICAL — AUTH FIELD FORMAT:
-- Login form MUST use 'username' and 'password' fields ONLY.
-- DO NOT use 'email' as the login credential field.
-- Backend login endpoint expects: { username, password }
-- api.js loginUser function must send: { username, password } NOT { email, password }
-- Register form uses: { username, email, password } (email is only for registration, not login)
+CRITICAL — AUTH:
+- Login uses 'username' + 'password' only (NOT email).
+- Register uses username + email + password.
+- Backend /api/login returns: { "token": "eyJ...", "user": {...} }
 
-For frontend/src/index.js:
-- React 18 createRoot. No BrowserRouter here. Only imports: react, react-dom/client, ./index.css, ./App.
-
-For frontend/src/App.js:
-- React Router v6: BrowserRouter, Routes, Route.
-- Export default function App. Routes for every page.
-- ONLY import components explicitly in blueprint files array.
-- Protected routes: <Route element={<PrivateRoute />}> wrapping children.
+For frontend/src/App.js — PURE ROUTER:
+- No API calls, no useEffect, no useState, no data fetching.
+- <Navbar /> MUST be inside <BrowserRouter>.
+- PrivateRoute Outlet pattern:
+    <Route element={<PrivateRoute />}>
+      <Route path="/x" element={<X />} />
+    </Route>
 
 For frontend/src/api.js:
-- axios with baseURL = process.env.REACT_APP_API_URL || 'http://localhost:5000'
-- Request interceptor: inject Authorization Bearer token from localStorage.
-- Response interceptor: on 401, clear localStorage and redirect to /login.
-- Named exports only — one async function per API endpoint.
-- MUST include: interceptors block + ALL endpoint functions. Do not stop early.
+- axios instance + request interceptor (JWT) + response interceptor (401→redirect)
+- loginUser saves: localStorage.setItem('token', response.data.token)
+- One named export per endpoint. Do not stop early.
 
 For components/:
-- Every useEffect MUST have [].
-- Navbar: check localStorage.getItem('token') BEFORE calling getUser(). Skip if no token.
-- Forms: controlled inputs + onChange + onSubmit with preventDefault().
-- After POST/PUT/DELETE: refresh data list automatically.
+- Every useEffect with []. Navbar checks token before getUser().
+- Forms: controlled inputs, preventDefault, refresh data after mutation.
 - ONLY import from: react, react-router-dom, ../api.
 
-COMPLETE COMPONENT STRUCTURE (follow this exactly for every component):
-1. import statements (react, react-router-dom, ../api)
-2. const ComponentName = () => {
-3.   useState declarations
-4.   useEffect with fetch + dependency array []
-5.   handler functions (handleSubmit, handleDelete, etc.)
-6.   return ( ... complete JSX ... )
-7. }
-8. export default ComponentName;
-(Steps 1-8 ALL required. File is invalid if any step is missing.)
+COMPONENT STRUCTURE (all 8 steps required):
+1. imports  2. const X = () => {  3. useState  4. useEffect+[]
+5. handlers  6. return (  7. complete JSX  8. }; export default X;
 
-UI DESIGN TOKENS:
-- Page wrapper: min-h-screen bg-gray-50 py-8 px-4
+UI TOKENS:
+- Wrapper: min-h-screen bg-gray-50 py-8 px-4
 - Card: bg-white rounded-2xl shadow-md hover:shadow-xl transition p-6
-- Button primary: bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-6 py-3 rounded-xl transition
-- Button secondary: bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold px-6 py-3 rounded-xl transition
-- Input: w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition
+- Button: bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-6 py-3 rounded-xl transition
+- Input: w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500
 - Loading: <div className="animate-spin rounded-full h-10 w-10 border-4 border-indigo-600 border-t-transparent"></div>
 - Error: bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm
-- Empty state: bg-white rounded-2xl shadow p-16 text-center with SVG icon
-
-NAVBAR (dark sticky):
-  <nav className="bg-gray-900 sticky top-0 z-50 shadow-lg">
-    <div className="max-w-7xl mx-auto px-4 flex items-center justify-between h-16">
-      <Link to="/" className="text-white font-bold text-xl">AppName</Link>
-      {token ? (logout button) : (login + signup links)}
-    </div>
-  </nav>
-
-HOME (gradient hero + feature cards):
-  Hero: bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500, text-5xl font-bold
-  Features: grid grid-cols-1 md:grid-cols-3 gap-8, bg-white rounded-2xl shadow-md p-8
-
-LOGIN/REGISTER (centered card):
-  min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50, max-w-md, rounded-2xl shadow-xl p-8
-
-LIST pages: max-w-7xl, grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6
-FORM pages: max-w-2xl, bg-white rounded-2xl shadow-md p-8
-
-✅ REQUIRED in every component: gradient hero on Home, hover effects, loading spinner, empty state with SVG, error styled red-50.
+- Navbar: bg-gray-900 sticky top-0 z-50 shadow-lg, h-16
+- Home hero: bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500
+- Login/Register: max-w-md bg-gradient-to-br from-indigo-50 to-purple-50 rounded-2xl shadow-xl p-8
 """
 
 
-def build_file(file_info, blueprint, project_path, existing_files={}):
-    """Builds a single file. Uses BACKEND_PROMPT or FRONTEND_PROMPT based on file type."""
+# ═══════════════════════════════════════════════════════════════
+# ERROR CLASSIFICATION FOR SURGICAL DEBUGGING
+# ═══════════════════════════════════════════════════════════════
+
+ERROR_BUCKETS = {
+    "structural": [
+        "truncated_component", "truncated_api", "critical_missing_export",
+        "critical_missing_component", "critical_missing_router", "empty_file",
+        "app_js_api_import", "navbar_outside_router", "private_route_wrong_pattern",
+    ],
+    "semantic": [
+        "token_key_mismatch", "plaintext_password", "plaintext_password_check",
+        "missing_set_password_call", "raw_fetch_instead_of_api", "missing_api_export",
+    ],
+    "syntactic": ["syntax_error", "invalid_json"],
+    "import": [
+        "phantom_backend_api", "duplicate_db_instance", "missing_import",
+        "bad_import", "missing_component", "css_import",
+    ],
+    "style": [
+        "missing_deps_array", "unsafe_error_access", "react17_api",
+        "double_router", "wrong_tailwind_tag", "missing_tailwind",
+        "missing_root_div", "misplaced_db_index", "duplicate_index_name",
+    ],
+    "config": [
+        "missing_proxy", "missing_field", "missing_dependency",
+        "missing_env_var", "missing_init",
+    ],
+}
+
+def classify_errors(errors):
+    buckets = defaultdict(list)
+    for err in errors:
+        placed = False
+        for bucket, types in ERROR_BUCKETS.items():
+            if err["type"] in types:
+                buckets[bucket].append(err)
+                placed = True
+                break
+        if not placed:
+            buckets["structural"].append(err)
+    return dict(buckets)
+
+
+def build_file(file_info, blueprint, project_path, existing_files=None):
+    if existing_files is None:
+        existing_files = {}
 
     file_path = file_info["path"]
     file_description = file_info["description"]
@@ -339,9 +510,20 @@ def build_file(file_info, blueprint, project_path, existing_files={}):
 
     print(f"\n📝 Building: {file_path}")
 
-    # ── Template injection — guaranteed-correct skeletons ──
+    # Check file cache
+    dep_codes = [existing_files[d] for d in depends_on if d in existing_files]
+    cache_key = _make_cache_key(file_description, dep_codes)
+    cached = cache_get(cache_key)
+    if cached:
+        print(f"  ⚡ Cache hit for {file_path} — skipping LLM call")
+        full_path = os.path.join(project_path, file_path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "w") as f:
+            f.write(cached)
+        return cached
+
+    # Template injection — guaranteed-correct, never sent to LLM
     SKELETON_TEMPLATES = {
-        # Fix: .env.example is always the same — never waste LLM retries on it
         ".env.example": (
             "DATABASE_URL=postgresql://user:password@localhost/dbname\n"
             "SECRET_KEY=your-secret-key-here\n"
@@ -385,21 +567,40 @@ def build_file(file_info, blueprint, project_path, existing_files={}):
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "w") as f:
             f.write(code)
+        cache_set(cache_key, code)
         print(f"  ✅ {file_path} written from template (guaranteed correct)")
         return code
 
-    # ── File-aware context ──
+    # Memory context injection
+    memory_context = ""
+    if MEMORY_ENABLED:
+        file_ext = os.path.splitext(file_path)[1]
+        for err_type in ["syntax_error", "truncated_component", "token_key_mismatch",
+                         "plaintext_password", "raw_fetch_instead_of_api"]:
+            fixes = recall_fixes(err_type, file_ext)
+            if fixes:
+                examples = "\n".join([
+                    f"  [{err_type}] BROKEN: {f['broken'][:100]} → FIXED: {f['fixed'][:100]}"
+                    for f in fixes[-2:]
+                ])
+                memory_context += f"\nKNOWN FIX PATTERN [{err_type}]:\n{examples}"
+        with _session_lock:
+            failed = list(_session_memory["failed_patterns"])
+        if failed:
+            memory_context += "\n\nAVOID THESE PATTERNS (caused failures this session):\n"
+            for p in failed[-5:]:
+                memory_context += f"  ❌ {p}\n"
+
+    # File-aware context
     file_aware_context = ""
     if "frontend/src/api.js" in existing_files:
-        import re as _re
-        api_exports = _re.findall(
+        api_exports = re.findall(
             r"^export\s+(?:const|async function|function)\s+(\w+)",
-            existing_files["frontend/src/api.js"],
-            _re.MULTILINE
+            existing_files["frontend/src/api.js"], re.MULTILINE
         )
         if api_exports:
-            file_aware_context += f"\nAPI functions available in '../api': {', '.join(api_exports)}"
-            file_aware_context += "\nIMPORTANT: Import and use ONLY these exact function names — do NOT invent new ones."
+            file_aware_context += f"\nAPI functions in '../api': {', '.join(api_exports)}"
+            file_aware_context += "\nUse ONLY these exact names — do not invent new ones."
 
     built_components = [
         os.path.basename(p).replace(".js", "")
@@ -408,17 +609,36 @@ def build_file(file_info, blueprint, project_path, existing_files={}):
     ]
     if built_components:
         file_aware_context += f"\nComponents already built: {', '.join(built_components)}"
-        file_aware_context += "\nIMPORTANT: Only import components from this list."
+        file_aware_context += "\nOnly import from this list."
+
+    if file_path == "frontend/src/App.js":
+        all_component_names = [
+            os.path.basename(p).replace(".js", "")
+            for p in existing_files
+            if p.startswith("frontend/src/components/") and p.endswith(".js")
+            and os.path.basename(p).replace(".js", "") not in ("PrivateRoute", "Navbar", "Footer", "Layout")
+        ]
+        blueprint_components = [
+            os.path.basename(f["path"]).replace(".js", "")
+            for f in blueprint.get("files", [])
+            if "components/" in f.get("path", "") and f["path"].endswith(".js")
+            and os.path.basename(f["path"]).replace(".js", "") not in ("PrivateRoute", "Navbar", "Footer", "Layout")
+        ]
+        all_page_components = list(dict.fromkeys(all_component_names + blueprint_components))
+        if all_page_components:
+            file_aware_context += f"\n\nPage components to route: {', '.join(all_page_components)}"
+            file_aware_context += (
+                "\nApp.js must route EVERY component above."
+                "\nPURE ROUTER — no useEffect, no useState, no API calls."
+                "\n<Navbar /> inside <BrowserRouter>."
+                "\nPrivateRoute Outlet pattern only."
+                "\nNEVER use 'import api from' — api.js has no default export."
+            )
 
     dependency_context = ""
     for dep in depends_on:
         if dep in existing_files:
             dependency_context += f"\n\n--- {dep} ---\n{existing_files[dep]}"
-
-    past_experience = query_experience(file_description)
-    memory_context = ""
-    if past_experience and past_experience[0]:
-        memory_context = "\nPAST SIMILAR CODE (use as reference):\n" + "\n".join(past_experience[0])
 
     user_prompt = f"""
 Project: {blueprint['description']}
@@ -432,32 +652,21 @@ Purpose: {file_description}
 
 Dependencies already written:
 {dependency_context if dependency_context else "None"}
-
 {memory_context}
 
 Write the COMPLETE, PRODUCTION-READY code for {file_path} now.
 No placeholders, no TODOs, no stubs. Real working code only.
 """
 
-    # CHANGE 2: Route to the correct prompt based on file type
-    is_backend = file_path.startswith("backend/") and file_path.endswith(".py")
-    is_frontend = file_path.startswith("frontend/") and file_path.endswith((".js", ".jsx", ".css", ".html"))
-
-    if is_backend:
-        system_prompt = BACKEND_PROMPT
-        task_type = "general"
-    else:
-        system_prompt = FRONTEND_PROMPT
-        task_type = "ui"
-
+    task_type = _get_task_type(file_path)
+    system_prompt = BACKEND_PROMPT if task_type in ("backend", "fast") else FRONTEND_PROMPT
     max_tokens = get_optimal_tokens(file_path)
 
-    if is_frontend:
-        print(f"  🎨 Using UI pipeline with {max_tokens} tokens")
+    print(f"  🎯 Task type: {task_type} | tokens: {max_tokens}")
 
     history = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
+        {"role": "user",   "content": user_prompt},
     ]
 
     last_error = ""
@@ -468,10 +677,8 @@ No placeholders, no TODOs, no stubs. Real working code only.
         if attempt > 1:
             print(f"  🔄 Retry attempt {attempt}...")
             if failure_patterns:
-                failure_hint = "\n\nPREVIOUS ATTEMPT FAILURES (do NOT repeat these):\n" + "\n".join(
-                    f"- {p}" for p in failure_patterns
-                )
-                history[-1]["content"] = user_prompt + failure_hint
+                hint = "\n\nPREVIOUS ATTEMPT FAILURES (do NOT repeat):\n" + "\n".join(f"- {p}" for p in failure_patterns)
+                history[-1]["content"] = user_prompt + hint
 
         try:
             response = call_llm(history, max_tokens=max_tokens, task_type=task_type)
@@ -480,80 +687,84 @@ No placeholders, no TODOs, no stubs. Real working code only.
             return final_code
 
         if not response or not response.choices:
-            failure_patterns.append("model returned empty response — output complete code")
+            failure_patterns.append("empty response — output complete code")
             continue
+
         raw = response.choices[0].message.content
         if not raw or not raw.strip():
-            failure_patterns.append("model returned blank content — output complete working code")
+            failure_patterns.append("blank content — output complete code")
             continue
-        code = raw.strip()
 
-        code = (code.replace("```python", "").replace("```javascript", "")
-                .replace("```jsx", "").replace("```css", "")
-                .replace("```json", "").replace("```html", "")
-                .replace("```", "").strip())
+        code = re.sub(r"^```[\w]*\n?", "", raw.strip())
+        code = re.sub(r"\n?```$", "", code).strip()
 
         if len(code) < 50:
-            failure_patterns.append(f"output was too short ({len(code)} chars) — write the COMPLETE file")
+            failure_patterns.append(f"output too short ({len(code)} chars)")
             continue
 
-        # ──────────────────────────────────────────────
-        # CHANGE 3: TRUNCATION DETECTION for .js files
-        # Before writing, validate the file isn't cut off
-        # ──────────────────────────────────────────────
+        # Component truncation detection
         if file_path.endswith(".js") and "components/" in file_path:
-            truncation_issues = []
-
+            issues = []
             if "export default" not in code:
-                truncation_issues.append("missing 'export default' — component is truncated")
+                issues.append("missing 'export default'")
             if "return (" not in code and "return(" not in code:
-                truncation_issues.append("missing 'return (' — JSX block is truncated")
-
-            if truncation_issues:
+                issues.append("missing 'return ('")
+            if issues:
                 component_name = os.path.basename(file_path).replace(".js", "")
-                print(f"  ❌ Truncation detected: {', '.join(truncation_issues)}")
-                failure_patterns.append(
-                    f"TRUNCATED OUTPUT — the file was cut off before completion. "
-                    f"You MUST write all 9 steps: "
-                    f"1) imports 2) const {component_name} = () => {{ 3) useState 4) useEffect with [] "
-                    f"5) handlers 6) return ( 7) complete JSX 8) closing }} 9) export default {component_name}; "
-                    f"Do NOT stop before step 9."
-                )
+                fp = " | ".join(issues)
+                failure_patterns.append(f"TRUNCATED — {fp}. Write all 8 steps through export default {component_name};")
+                with _session_lock:
+                    _session_memory["failed_patterns"].add(f"truncation in {component_name}")
                 history.append({"role": "assistant", "content": code})
-                history.append({"role": "user", "content": f"TRUNCATED — {' | '.join(truncation_issues)}. Write the COMPLETE file including export default and return ()."})
+                history.append({"role": "user", "content": f"TRUNCATED: {fp}. Rewrite completely."})
                 continue
 
-        # CHANGE 4: api.js specific truncation check
+        # api.js validation
         if file_path == "frontend/src/api.js":
-            api_issues = []
-
+            issues = []
             if "interceptors" not in code:
-                api_issues.append("missing axios interceptors block")
-            if "export" not in code:
-                api_issues.append("missing exported functions")
-
-            # Check that functions exist for each blueprint endpoint
-            import re as _re
-            export_count = len(_re.findall(r"^export\s+const\s+\w+", code, _re.MULTILINE))
+                issues.append("missing interceptors")
+            export_count = len(re.findall(r"^export\s+const\s+\w+", code, re.MULTILINE))
             endpoint_count = len(blueprint.get("api_endpoints", []))
-            if export_count < max(2, endpoint_count - 2):  # allow up to 2 missing
-                api_issues.append(f"only {export_count} exported functions but {endpoint_count} endpoints defined — likely truncated")
-
-            if api_issues:
-                print(f"  ❌ api.js truncation detected: {', '.join(api_issues)}")
-                failure_patterns.append(
-                    f"api.js is INCOMPLETE: {', '.join(api_issues)}. "
-                    f"api.js MUST contain: 1) axios instance with baseURL "
-                    f"2) request interceptor (JWT injection) "
-                    f"3) response interceptor (401 → clear localStorage + redirect) "
-                    f"4) one exported async function per API endpoint ({endpoint_count} total). "
-                    f"Write all sections completely."
-                )
+            if export_count < max(2, endpoint_count - 2):
+                issues.append(f"only {export_count}/{endpoint_count} exports")
+            if "response.data.access_token" in code:
+                issues.append("wrong token key (access_token → token)")
+                with _session_lock:
+                    _session_memory["failed_patterns"].add("access_token used instead of token")
+            if issues:
+                fp = " | ".join(issues)
+                failure_patterns.append(f"api.js incomplete: {fp}")
                 history.append({"role": "assistant", "content": code})
-                history.append({"role": "user", "content": f"api.js is incomplete: {' | '.join(api_issues)}. Write the FULL api.js with interceptors AND all {endpoint_count} endpoint functions."})
+                history.append({"role": "user", "content": f"api.js broken: {fp}. Rewrite fully. Token key = response.data.token."})
                 continue
 
-        # Write file to project
+        # App.js structural validation
+        if file_path == "frontend/src/App.js":
+            issues = []
+            if "from '../api'" in code or "from './api'" in code:
+                issues.append("imports from api — App.js is router only")
+            if "useEffect" in code:
+                issues.append("has useEffect — remove all hooks")
+            if "useState" in code:
+                issues.append("has useState — remove all state")
+            br_pos = code.find("<BrowserRouter")
+            nav_pos = code.find("<Navbar")
+            if nav_pos != -1 and br_pos != -1 and nav_pos < br_pos:
+                issues.append("Navbar before BrowserRouter — move it inside")
+            if re.search(r"<PrivateRoute\s*>\s*<\w", code):
+                issues.append("old PrivateRoute children pattern — use Outlet")
+            # Fix 2: 'import api from' is a default import — api.js has no default export
+            if re.search(r"import\s+api\s+from", code):
+                issues.append("'import api from' is a default import — api.js has no default export, use named imports: import { getProducts } from '../api'")
+            if issues:
+                fp = " | ".join(issues)
+                failure_patterns.append(f"App.js structural: {fp}")
+                history.append({"role": "assistant", "content": code})
+                history.append({"role": "user", "content": f"App.js wrong: {fp}. Pure router, no hooks, Navbar inside BrowserRouter, Outlet pattern, named imports only."})
+                continue
+
+        # Write file
         full_path = os.path.join(project_path, file_path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "w") as f:
@@ -563,32 +774,47 @@ No placeholders, no TODOs, no stubs. Real working code only.
             result = execute_python_code(f"import ast\nast.parse(open('{full_path}').read())\nprint('syntax ok')")
             if "syntax ok" in result["stdout"]:
                 print(f"  ✅ {file_path} built successfully")
-                final_code = code
-                add_experience(file_description, code, error=last_error)
+                cache_set(cache_key, code)
                 return code
             else:
                 last_error = result["stderr"]
                 print(f"  ❌ Syntax error: {last_error[:100]}")
                 failure_patterns.append(f"syntax error: {last_error[:150]}")
                 history.append({"role": "assistant", "content": code})
-                history.append({"role": "user", "content": f"Syntax error:\n{last_error}\n\nFix and output the complete corrected file."})
+                history.append({"role": "user", "content": f"Syntax error:\n{last_error}\n\nFix and output complete file."})
         else:
             print(f"  ✅ {file_path} built successfully")
-            final_code = code
+            cache_set(cache_key, code)
             return code
 
     print(f"  ⚠️  Could not fix {file_path} after 3 attempts")
     return final_code
 
 
+# ═══════════════════════════════════════════════════════════════
+# PARALLEL FILE BUILDING
+# ═══════════════════════════════════════════════════════════════
+
+_existing_files_lock = threading.Lock()
+
+
 def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, on_file_done=None):
-    """Builds an entire project from a blueprint — sequential for stability."""
+
+    with _session_lock:
+        _session_memory["provider_wins"].clear()
+        _session_memory["provider_latency"].clear()
+        _session_memory["fix_patterns"].clear()
+        _session_memory["failed_patterns"].clear()
+
+    mem = _load_long_term_memory()
+    mem["build_count"] = mem.get("build_count", 0) + 1
+    _save_long_term_memory(mem)
 
     project_name = blueprint["project_name"]
     project_path = os.path.join(output_dir, project_name)
     os.makedirs(project_path, exist_ok=True)
 
-    print(f"\n🚀 Building project: {project_name}")
+    print(f"\n🚀 Building project: {project_name} (build #{mem['build_count']})")
     print(f"📁 Output: {project_path}")
 
     existing_files = {}
@@ -596,21 +822,13 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
     files = blueprint["files"]
 
     def get_waves(files):
-        completed = set()
-        waves = []
-        remaining = list(files)
+        completed, waves, remaining = set(), [], list(files)
         while remaining:
-            wave = []
-            still_remaining = []
+            wave, still_remaining = [], []
             for f in remaining:
-                deps = f.get("depends_on", [])
-                if all(d in completed for d in deps):
-                    wave.append(f)
-                else:
-                    still_remaining.append(f)
+                (wave if all(d in completed for d in f.get("depends_on", [])) else still_remaining).append(f)
             if not wave:
-                wave = still_remaining
-                still_remaining = []
+                wave, still_remaining = still_remaining, []
             for f in wave:
                 completed.add(f["path"])
             waves.append(wave)
@@ -618,33 +836,57 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
         return waves
 
     waves = get_waves(files)
-    print(f"⚡ Building in {len(waves)} wave(s) — SEQUENTIAL mode (stable on free tier)")
+    print(f"⚡ Building in {len(waves)} wave(s) with parallel execution per wave")
+
+    TEMPLATE_PATHS = {".env.example", "backend/__init__.py", "frontend/src/index.js", "frontend/src/components/PrivateRoute.js"}
 
     for wave_idx, wave in enumerate(waves):
         print(f"\n🌊 Wave {wave_idx + 1}/{len(waves)}: {len(wave)} file(s)")
 
-        for file_info in wave:
-            if on_file_start:
-                on_file_start(file_info["path"])
-            code = build_file(
-                file_info=file_info,
-                blueprint=blueprint,
-                project_path=project_path,
-                existing_files=existing_files
-            )
+        template_files = [f for f in wave if f["path"] in TEMPLATE_PATHS]
+        llm_files = [f for f in wave if f not in template_files]
+
+        for file_info in template_files:
+            if on_file_start: on_file_start(file_info["path"])
+            code = build_file(file_info, blueprint, project_path, dict(existing_files))
             if code:
-                existing_files[file_info["path"]] = code
-                if on_file_done:
-                    on_file_done(file_info["path"], success=True)
+                with _existing_files_lock:
+                    existing_files[file_info["path"]] = code
+                if on_file_done: on_file_done(file_info["path"], success=True)
             else:
                 failed_files.append(file_info["path"])
-                if on_file_done:
-                    on_file_done(file_info["path"], success=False)
+                if on_file_done: on_file_done(file_info["path"], success=False)
+
+        if llm_files:
+            existing_snapshot = dict(existing_files)
+            results = {}
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_path = {
+                    executor.submit(build_file, fi, blueprint, project_path, existing_snapshot): fi["path"]
+                    for fi in llm_files
+                }
+                if on_file_start:
+                    for fi in llm_files: on_file_start(fi["path"])
+                for future in as_completed(future_to_path):
+                    path = future_to_path[future]
+                    try:
+                        results[path] = future.result()
+                    except Exception as e:
+                        print(f"  ❌ Thread error for {path}: {e}")
+                        results[path] = None
+
+            for path, code in results.items():
+                if code:
+                    with _existing_files_lock:
+                        existing_files[path] = code
+                    if on_file_done: on_file_done(path, success=True)
+                else:
+                    failed_files.append(path)
+                    if on_file_done: on_file_done(path, success=False)
 
         if wave_idx < len(waves) - 1:
-            time.sleep(3)
+            time.sleep(2)
 
-    # ── TEST + DEBUG LOOP ──
     print(f"\n{'='*50}")
     print("🧪 RUNNING TESTER + DEBUGGER...")
     print(f"{'='*50}")
@@ -652,21 +894,13 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
     try:
         from agent.tester import run_tests, format_errors_for_log
         from agent.debugger import run_debug_loop
-
-        existing_files, final_test_result, attempts = run_debug_loop(
-            files=existing_files,
-            tester_fn=run_tests,
-            max_retries=3
-        )
-
+        existing_files, final_test_result, attempts = run_debug_loop(files=existing_files, tester_fn=run_tests, max_retries=3)
         for file_path, code in existing_files.items():
             full_path = os.path.join(project_path, file_path)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w") as f:
                 f.write(code)
-
         print(f"\n🔬 Test result after {attempts} debug attempt(s): {final_test_result['summary']}")
-
     except Exception as e:
         print(f"\n⚠️  Tester/Debugger failed: {e} — continuing with unvalidated build")
 
@@ -674,50 +908,7 @@ def build_project(blueprint, output_dir="sandbox/projects", on_file_start=None, 
         f.write("flask\nflask-cors\nflask-sqlalchemy\nflask-jwt-extended\nflask-migrate\nsqlalchemy\npsycopg2-binary\npython-dotenv\nwerkzeug\n")
     print("\n📄 requirements.txt written")
 
-    readme = f"""# {project_name.replace('_', ' ').title()}
-
-{blueprint['description']}
-
-## Stack
-- Frontend: {blueprint['stack']['frontend']}
-- Backend: {blueprint['stack']['backend']}
-- Database: {blueprint['stack']['database']}
-
-## Prerequisites
-- Python 3.9+, Node.js 16+, PostgreSQL
-
-## Setup
-
-### Backend
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-flask db init && flask db migrate && flask db upgrade
-python -m backend.app
-```
-
-### Frontend
-```bash
-cd frontend && npm install && npm start
-```
-
-## Environment Variables
-| Variable | Description | Example |
-|----------|-------------|---------|
-| DATABASE_URL | PostgreSQL connection string | postgresql://user:pass@localhost/dbname |
-| SECRET_KEY | Flask secret key | your-secret-key |
-| JWT_SECRET_KEY | JWT signing key | your-jwt-secret |
-| DEBUG | Debug mode | True |
-| FLASK_ENV | Flask environment | development |
-| REACT_APP_API_URL | Backend URL for React | http://localhost:5000 |
-
-## API Endpoints
-"""
-    for endpoint in blueprint.get("api_endpoints", []):
-        if isinstance(endpoint, dict):
-            auth = "🔒" if endpoint.get("auth_required") else "🔓"
-            readme += f"| {endpoint.get('method','GET')} | {endpoint.get('path','/')} | {endpoint.get('description','')} | {auth} |\n"
-
+    readme = f"# {project_name.replace('_', ' ').title()}\n\n{blueprint['description']}\n\n## Setup\n\n### Backend\n```bash\npip install -r requirements.txt\ncp .env.example .env\nflask db init && flask db migrate && flask db upgrade\npython -m backend.app\n```\n\n### Frontend\n```bash\ncd frontend && npm install && npm start\n```\n"
     with open(os.path.join(project_path, "README.md"), "w") as f:
         f.write(readme)
     print("📄 README.md written")
@@ -726,16 +917,20 @@ cd frontend && npm install && npm start
     print(f"✅ Project built: {len(existing_files)}/{len(files)} files")
     if failed_files:
         print(f"⚠️  Failed files: {failed_files}")
-    print(f"📁 Location: {project_path}")
 
+    with _session_lock:
+        wins = dict(_session_memory["provider_wins"])
+    if wins:
+        top = sorted(wins.items(), key=lambda x: x[1], reverse=True)[:3]
+        print(f"🏆 Top providers this build: {', '.join(f'{n}({c})' for n,c in top)}")
+
+    print(f"📁 Location: {project_path}")
     return project_path, existing_files, failed_files
 
 
 if __name__ == "__main__":
     from agent.planner import generate_blueprint
-    blueprint = generate_blueprint(
-        "A simple e-commerce store where users can browse products, add to cart, and place orders"
-    )
+    blueprint = generate_blueprint("A simple e-commerce store where users can browse products, add to cart, and place orders")
     if blueprint:
         project_path, built, failed = build_project(blueprint)
         print(f"\nBuilt files: {list(built.keys())}")

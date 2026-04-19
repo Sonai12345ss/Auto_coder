@@ -69,6 +69,42 @@ def test_python_imports(file_path, code):
                 "line": None,
             })
 
+    # ─────────────────────────────────────────────────────────
+    # NEW CHECK: Plain-text password storage in routes.py
+    # Catches User(password=data['password']) without hashing.
+    # Silent auth failure — login will never work.
+    # ─────────────────────────────────────────────────────────
+    if "routes.py" in file_path:
+        # Detect if User (or any model) is constructed with a raw password field
+        if re.search(r"User\s*\(.*password\s*=\s*data\[", code, re.DOTALL):
+            # Make sure set_password isn't being called somewhere nearby
+            if "set_password" not in code and "generate_password_hash" not in code:
+                errors.append({
+                    "file": file_path,
+                    "type": "plaintext_password",
+                    "message": (
+                        "routes.py stores plain-text password in User constructor. "
+                        "Use user.set_password(data['password']) AFTER creating the user object, "
+                        "or User(password=generate_password_hash(data['password'])). "
+                        "Also update login to use user.check_password(data['password'])."
+                    ),
+                    "line": None,
+                })
+
+    # routes.py: login compares plain-text passwords (==) instead of check_password
+    if "routes.py" in file_path:
+        if re.search(r"user\.password\s*==\s*data\[", code):
+            errors.append({
+                "file": file_path,
+                "type": "plaintext_password_check",
+                "message": (
+                    "routes.py compares passwords with == (plain-text comparison). "
+                    "Use user.check_password(data['password']) instead. "
+                    "Plain-text comparison will fail once passwords are hashed."
+                ),
+                "line": None,
+            })
+
     # app.py: duplicate db definition conflicts with __init__.py
     if "app.py" in file_path and "db = SQLAlchemy()" in code:
         errors.append({
@@ -187,6 +223,63 @@ def test_js_syntax(file_path, code):
                 "line": None,
             })
 
+        # ─────────────────────────────────────────────────────────
+        # NEW CHECK: App.js must not render UI outside <BrowserRouter>
+        # Navbar using <Link> outside <BrowserRouter> will crash.
+        # ─────────────────────────────────────────────────────────
+        if "Navbar" in code and "BrowserRouter" in code:
+            # Rough structural check: Navbar should appear INSIDE BrowserRouter block
+            browser_router_start = code.find("<BrowserRouter")
+            navbar_in_return = code.find("<Navbar")
+            if navbar_in_return != -1 and browser_router_start != -1:
+                if navbar_in_return < browser_router_start:
+                    errors.append({
+                        "file": file_path,
+                        "type": "navbar_outside_router",
+                        "message": (
+                            "App.js renders <Navbar /> BEFORE <BrowserRouter>. "
+                            "Navbar uses <Link> which requires a Router context — "
+                            "move <Navbar /> inside <BrowserRouter>."
+                        ),
+                        "line": None,
+                    })
+
+        # ─────────────────────────────────────────────────────────
+        # NEW CHECK: App.js must not import api or make API calls
+        # App.js is a router only. Data fetching belongs in pages.
+        # ─────────────────────────────────────────────────────────
+        if "from '../api'" in code or "from './api'" in code or "from '../../api'" in code:
+            errors.append({
+                "file": file_path,
+                "type": "app_js_api_import",
+                "message": (
+                    "App.js imports from api.js and makes API calls — this is wrong. "
+                    "App.js should be a pure router with no data fetching. "
+                    "Remove the api import, useEffect, useState, and all fetch logic from App.js. "
+                    "Data fetching belongs in individual page components."
+                ),
+                "line": None,
+            })
+
+        # ─────────────────────────────────────────────────────────
+        # NEW CHECK: PrivateRoute must use Outlet pattern (v6)
+        # Not the children prop wrapper pattern
+        # ─────────────────────────────────────────────────────────
+        if "PrivateRoute" in code:
+            # Detect old children-prop pattern: <PrivateRoute><Component /></PrivateRoute>
+            if re.search(r"<PrivateRoute\s*>\s*<\w", code):
+                errors.append({
+                    "file": file_path,
+                    "type": "private_route_wrong_pattern",
+                    "message": (
+                        "App.js uses <PrivateRoute><Component /></PrivateRoute> — "
+                        "this is the React Router v5 children pattern. "
+                        "For React Router v6 with Outlet, use: "
+                        "<Route element={<PrivateRoute />}><Route path='/x' element={<X />} /></Route>"
+                    ),
+                    "line": None,
+                })
+
     # index.js React 18
     if file_path.endswith("index.js") and "components/" not in file_path:
         if "createRoot" not in code:
@@ -211,32 +304,44 @@ def test_js_syntax(file_path, code):
                 })
 
     # ─────────────────────────────────────────────────────────
-    # TRUNCATED COMPONENT DETECTION (structural + semantic)
-    # Catches components cut off syntactically OR logically
+    # NEW CHECK: api.js token key mismatch
+    # Backend returns {"token": ...} but frontend may read
+    # response.data.access_token — a silent auth failure.
     # ─────────────────────────────────────────────────────────
+    if file_path == "frontend/src/api.js":
+        if "response.data.access_token" in code:
+            errors.append({
+                "file": file_path,
+                "type": "token_key_mismatch",
+                "message": (
+                    "api.js reads response.data.access_token but the backend /api/login "
+                    "returns {\"token\": ...} not {\"access_token\": ...}. "
+                    "Change to response.data.token. This causes silent auth failure — "
+                    "login appears to work but the token is never saved."
+                ),
+                "line": None,
+            })
+
+    # TRUNCATED COMPONENT DETECTION (structural + semantic)
     if "components/" in file_path and file_path.endswith(".js"):
         truncation_issues = []
         component_name = os.path.basename(file_path).replace(".js", "")
 
-        # Structural: file cut off before completion
         if "export default" not in code:
             truncation_issues.append("missing 'export default'")
         if "return (" not in code and "return(" not in code:
             truncation_issues.append("missing 'return (' — JSX block absent")
 
-        # Semantic: has imports/hooks but no JSX output (model stopped mid-function)
         has_imports = "import " in code
         has_hooks = "useState" in code or "useEffect" in code
         has_jsx = "<div" in code or "<span" in code or "<button" in code or "<form" in code or "<p " in code
         if has_imports and has_hooks and not has_jsx:
             truncation_issues.append("has hooks but no JSX elements — model stopped before return()")
 
-        # Semantic: unused import is a truncation signal (model started, then stopped)
         import_names = re.findall(r"^import\s+(?:React,\s*)?\{\s*([^}]+)\}", code, re.MULTILINE)
         all_imported = []
         for grp in import_names:
             all_imported.extend([n.strip() for n in grp.split(",")])
-        # Check if useState imported but no useState( usage (besides the import line itself)
         if "useState" in all_imported:
             usage_count = code.count("useState(")
             if usage_count == 0:
@@ -254,10 +359,7 @@ def test_js_syntax(file_path, code):
                 "line": None,
             })
 
-    # ─────────────────────────────────────────────────────────
-    # CHANGE 5b: TRUNCATED api.js DETECTION
-    # Catches api.js missing interceptors or endpoint functions
-    # ─────────────────────────────────────────────────────────
+    # TRUNCATED api.js DETECTION
     if file_path == "frontend/src/api.js":
         api_issues = []
         if "interceptors" not in code:
@@ -381,19 +483,16 @@ def check_cross_file_consistency(files):
     if api_code:
         api_exports = set(re.findall(r"^export\s+(?:const|async function|function)\s+(\w+)", api_code, re.MULTILINE))
 
-    # Fix 1: App.js route count vs component count
-    # Catches App.js that's syntactically valid but logically truncated (missing routes)
+    # App.js route count vs component count
     app_js_code = files.get("frontend/src/App.js", "")
     if app_js_code:
         route_count = len(re.findall(r"<Route\s", app_js_code))
-        # Count real page components (exclude layout/guard components)
         EXCLUDED_COMPONENTS = {"PrivateRoute", "Navbar", "Footer", "Layout", "App"}
         page_components = sum(
             1 for p in file_paths
             if "components/" in p and p.endswith(".js")
             and not any(x in p for x in EXCLUDED_COMPONENTS)
         )
-        # If routes < components - 3, App.js is almost certainly truncated
         if page_components > 2 and route_count < max(2, page_components - 3):
             errors.append({
                 "file": "frontend/src/App.js",
@@ -406,6 +505,61 @@ def check_cross_file_consistency(files):
                 ),
                 "line": None,
             })
+
+    # ─────────────────────────────────────────────────────────
+    # NEW CHECK: Cross-file password consistency
+    # If models.py has set_password/check_password, routes.py
+    # must use them — not raw string comparison or assignment.
+    # ─────────────────────────────────────────────────────────
+    models_code = files.get("backend/models.py", "")
+    routes_code = files.get("backend/routes.py", "")
+    if models_code and routes_code:
+        has_pw_methods = "set_password" in models_code and "check_password" in models_code
+        if has_pw_methods:
+            if "set_password" not in routes_code and re.search(r"User\s*\(.*password\s*=", routes_code, re.DOTALL):
+                errors.append({
+                    "file": "backend/routes.py",
+                    "type": "missing_set_password_call",
+                    "message": (
+                        "models.py defines set_password() and check_password() but routes.py "
+                        "never calls set_password() during registration. "
+                        "After creating the User, call: new_user.set_password(data['password']). "
+                        "Also ensure login uses: user.check_password(data['password'])."
+                    ),
+                    "line": None,
+                })
+
+    # ─────────────────────────────────────────────────────────
+    # NEW CHECK: api.js exports vs routes.py endpoints
+    # Every major route group should have a corresponding
+    # api.js export. Catches the case where api.js is built
+    # before routes.py and misses endpoints.
+    # ─────────────────────────────────────────────────────────
+    if api_code and routes_code:
+        route_paths = re.findall(r"@routes\.route\(['\"]([^'\"]+)['\"]", routes_code)
+        api_export_names = list(api_exports)
+
+        # Build a set of resource names from route paths (e.g. 'products', 'orders', 'users')
+        route_resources = set()
+        for rp in route_paths:
+            parts = [p for p in rp.strip("/").split("/") if p and not p.startswith("<")]
+            if len(parts) >= 2:  # /api/resource
+                route_resources.add(parts[1])  # e.g. 'products'
+
+        # For each resource, check that at least one api export references it
+        for resource in route_resources:
+            has_export = any(resource.lower() in name.lower() for name in api_export_names)
+            if not has_export:
+                errors.append({
+                    "file": "frontend/src/api.js",
+                    "type": "missing_api_export",
+                    "message": (
+                        f"routes.py has endpoints for '{resource}' but api.js has no exported "
+                        f"function referencing '{resource}'. Add get{resource.capitalize()}(), "
+                        f"create{resource.capitalize()}(), etc. to api.js."
+                    ),
+                    "line": None,
+                })
 
     # Cross-file import check
     for path, code in files.items():
