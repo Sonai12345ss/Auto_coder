@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Pre-initialize all clients once at startup
 groq1   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 groq2   = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
 groq3   = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
@@ -18,27 +17,25 @@ openrouter  = OpenAI(base_url="https://openrouter.ai/api/v1",  api_key=os.enviro
 doubleword  = OpenAI(base_url="https://api.doubleword.ai/v1",  api_key=os.environ.get("DOUBLEWORD_API_KEY", ""))
 
 def call_llm(messages):
-    """Try each provider in order with exponential backoff on rate limits."""
     providers = [
         ("Groq-1 / llama-3.3-70b",      lambda: groq1.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
         ("Groq-2 / llama-3.3-70b",      lambda: groq2.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
         ("Groq-3 / llama-3.3-70b",      lambda: groq3.chat.completions.create(model="llama-3.3-70b-versatile", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Groq-1 / gemma2-9b",          lambda: groq1.chat.completions.create(model="llama-3.1-8b-instant",            messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Groq-2 / gemma2-9b",          lambda: groq2.chat.completions.create(model="llama-3.1-8b-instant",            messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Groq-3 / gemma2-9b",          lambda: groq3.chat.completions.create(model="llama-3.1-8b-instant",            messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Groq-1 / gemma2-9b",          lambda: groq1.chat.completions.create(model="llama-3.1-8b-instant",    messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Groq-2 / gemma2-9b",          lambda: groq2.chat.completions.create(model="llama-3.1-8b-instant",    messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Groq-3 / gemma2-9b",          lambda: groq3.chat.completions.create(model="llama-3.1-8b-instant",    messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-1 / gemini-2.0-flash",  lambda: gemini1.chat.completions.create(model="gemini-2.0-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-2 / gemini-2.0-flash",  lambda: gemini2.chat.completions.create(model="gemini-2.0-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-3 / gemini-2.0-flash",  lambda: gemini3.chat.completions.create(model="gemini-2.0-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-1 / gemini-2.5-flash",  lambda: gemini1.chat.completions.create(model="gemini-2.5-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-2 / gemini-2.5-flash",  lambda: gemini2.chat.completions.create(model="gemini-2.5-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
         ("Gemini-3 / gemini-2.5-flash",  lambda: gemini3.chat.completions.create(model="gemini-2.5-flash",     messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-1 / gemini-2.5-pro",    lambda: gemini1.chat.completions.create(model="gemini-2.5-pro", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-2 / gemini-2.5-pro",    lambda: gemini2.chat.completions.create(model="gemini-2.5-pro", messages=messages, temperature=0.2, max_tokens=4096)),
-        ("Gemini-3 / gemini-2.5-pro",    lambda: gemini3.chat.completions.create(model="gemini-2.5-pro", messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-1 / gemini-2.5-pro",    lambda: gemini1.chat.completions.create(model="gemini-2.5-pro",       messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-2 / gemini-2.5-pro",    lambda: gemini2.chat.completions.create(model="gemini-2.5-pro",       messages=messages, temperature=0.2, max_tokens=4096)),
+        ("Gemini-3 / gemini-2.5-pro",    lambda: gemini3.chat.completions.create(model="gemini-2.5-pro",       messages=messages, temperature=0.2, max_tokens=4096)),
         ("OpenRouter / llama-3.3-70b",   lambda: openrouter.chat.completions.create(model="meta-llama/llama-3.3-70b-instruct:free", messages=messages, temperature=0.2, max_tokens=4096)),
         ("OpenRouter / gemma-3-27b",     lambda: openrouter.chat.completions.create(model="google/gemma-3-27b-it:free", messages=messages, temperature=0.2, max_tokens=4096)),
         ("OpenRouter / gemma-3-12b",     lambda: openrouter.chat.completions.create(model="google/gemma-3-12b-it:free", messages=messages, temperature=0.2, max_tokens=4096)),
-        # Paid fallback — only used when all free providers fail
         ("Doubleword / Qwen3.5-35B",     lambda: doubleword.chat.completions.create(model="Qwen/Qwen3.5-35B-A3B-FP8",    messages=messages, temperature=0.2, max_tokens=4096)),
         ("Doubleword / Qwen3.5-397B",    lambda: doubleword.chat.completions.create(model="Qwen/Qwen3.5-397B-A17B-FP8",  messages=messages, temperature=0.2, max_tokens=4096)),
     ]
@@ -64,6 +61,11 @@ def call_llm(messages):
             continue
     raise Exception(f"All planner providers failed. Last error: {last_error}")
 
+# ─── FIX: models.py depends on __init__.py so it builds in Wave 1 ───
+# Wave 1 = files with 0 or 1 dependency (processed when providers are fresh)
+# Wave 2 = components (9+ files in parallel, exhausts rate limits)
+# Without this fix: models.py was in Wave 2 alongside 9 components — provider
+# exhaustion caused all 3 build attempts to fail with syntax errors.
 PLANNER_PROMPT = """
 You are a senior software architect. Your job is to take a project description and create a detailed project blueprint in JSON format.
 
@@ -74,6 +76,7 @@ RULES:
 4. NEVER import a component in App.js that is not listed as a file to be generated.
 
 BACKEND FILES (always include all of these):
+- backend/__init__.py — initializes db = SQLAlchemy() and jwt = JWTManager()
 - backend/config.py — database URL, SECRET_KEY, JWT_SECRET_KEY, debug settings
 - backend/models.py — SQLAlchemy models with password hashing, to_dict(), created_at
 - backend/routes.py — ALL API endpoints including /api/register, /api/login, /api/user
@@ -81,7 +84,7 @@ BACKEND FILES (always include all of these):
 
 FRONTEND FILES (always include all of these):
 - frontend/package.json — react, react-dom, react-scripts, axios, react-router-dom
-- frontend/src/index.js — ReactDOM.render entry point
+- frontend/src/index.js — ReactDOM.createRoot entry point (React 18)
 - frontend/src/index.css — complete stylesheet with variables, buttons, forms, navbar, cards
 - frontend/src/App.js — routing with BrowserRouter, Routes, Route for every page
 - frontend/src/api.js — axios instance with JWT interceptor, one function per endpoint
@@ -107,6 +110,12 @@ CRITICAL RULES FOR FILES:
 - ALWAYS include frontend/src/components/PrivateRoute.js — a route guard that redirects to /login if no JWT token in localStorage
 - ALWAYS include frontend/public/index.html — the React HTML template with Tailwind CDN
 
+CRITICAL — DEPENDENCY ORDER (read carefully):
+backend/models.py MUST have "depends_on": [] (empty array, no dependencies).
+This ensures models.py builds in Wave 1 alongside __init__.py and config.py, before
+the parallel component wave (Wave 2) that exhausts all API rate limits.
+If models.py depends on config.py, it lands in Wave 2 with 9+ components and fails.
+
 OUTPUT FORMAT — output exactly this JSON structure:
 {
   "project_name": "snake_case_name",
@@ -118,6 +127,11 @@ OUTPUT FORMAT — output exactly this JSON structure:
   },
   "files": [
     {
+      "path": "backend/__init__.py",
+      "description": "Makes backend a Python package. Initializes db = SQLAlchemy() and jwt = JWTManager()",
+      "depends_on": []
+    },
+    {
       "path": "backend/config.py",
       "description": "Flask config with DATABASE_URL, SECRET_KEY, JWT_SECRET_KEY from env",
       "depends_on": []
@@ -125,7 +139,7 @@ OUTPUT FORMAT — output exactly this JSON structure:
     {
       "path": "backend/models.py",
       "description": "SQLAlchemy models with password hashing via werkzeug, to_dict(), created_at on every model",
-      "depends_on": ["backend/config.py"]
+      "depends_on": []
     },
     {
       "path": "backend/routes.py",
@@ -164,7 +178,7 @@ OUTPUT FORMAT — output exactly this JSON structure:
     },
     {
       "path": "frontend/src/components/Login.js",
-      "description": "Login form with email and password controlled inputs, onSubmit calls api login, shows inline error, calls onLogin prop with token on success",
+      "description": "Login form with username and password controlled inputs, onSubmit calls api login, shows inline error",
       "depends_on": ["frontend/src/api.js"]
     },
     {
@@ -195,16 +209,19 @@ OUTPUT FORMAT — output exactly this JSON structure:
   "setup_instructions": [
     "Copy .env.example to .env and fill in your values",
     "pip install -r requirements.txt",
-    "python backend/app.py",
+    "flask db init && flask db migrate && flask db upgrade",
+    "python -m backend.app",
     "cd frontend && npm install && npm start"
   ]
 }
 
 IMPORTANT: The files array in your output must include ALL component files that App.js will import.
 Add resource-specific components based on the project (e.g. for a todo app add TodoList.js, TodoForm.js).
+backend/models.py MUST have depends_on: [] — empty array ensures it builds in Wave 1 before component rate limit exhaustion.
 """
 
 REQUIRED_FILES = [
+    "backend/__init__.py",
     "backend/config.py",
     "backend/models.py",
     "backend/routes.py",
@@ -225,17 +242,15 @@ REQUIRED_FILES = [
 
 
 def generate_blueprint(project_description):
-    """Takes a project description and returns a structured JSON blueprint."""
     print("\n🧠 Planner Agent thinking...")
 
     response = call_llm([
         {"role": "system", "content": PLANNER_PROMPT},
-        {"role": "user", "content": f"Create a complete blueprint for: {project_description}\n\nRemember: every component that App.js imports MUST be in the files list."}
+        {"role": "user", "content": f"Create a complete blueprint for: {project_description}\n\nRemember: every component that App.js imports MUST be in the files list. backend/models.py MUST have depends_on: [] (empty — Wave 1 placement)"}
     ])
 
     raw = response.choices[0].message.content.strip()
 
-    # Clean up in case model adds backticks anyway
     if "```json" in raw:
         raw = raw.split("```json")[1].split("```")[0].strip()
     elif "```" in raw:
@@ -244,7 +259,7 @@ def generate_blueprint(project_description):
     try:
         blueprint = json.loads(raw)
 
-        # Enforce required files are always present
+        # Enforce required files
         existing_paths = [f["path"] for f in blueprint["files"]]
         for required in REQUIRED_FILES:
             if required not in existing_paths:
@@ -255,8 +270,26 @@ def generate_blueprint(project_description):
                     "depends_on": []
                 })
 
-        # KEY FIX: Parse App.js description to find any extra components mentioned
-        # and ensure they are in the files list
+        # ─── FIX: Enforce models.py depends on __init__.py ───────────────────────
+        # This is the critical wave-ordering fix. Without it, models.py lands in
+        # the same wave as 9+ parallel components and fails due to rate limits.
+        # With __init__.py as a dependency, models.py is guaranteed to be in Wave 1
+        # (or at most Wave 2, before any component wave) when providers are fresh.
+        # ─── FIX: models.py must be in Wave 1, built before the parallel component wave.
+        # Wave 1 = files with depends_on: [] (processed when all providers are fresh).
+        # With depends_on: [], models.py builds alongside __init__.py and config.py,
+        # NOT in Wave 2 where 9+ parallel components exhaust all API rate limits.
+        # The builder passes full blueprint context to every file, so models.py does
+        # not actually need to wait for config.py — the dependency was only cosmetic.
+        for f in blueprint["files"]:
+            if f["path"] == "backend/models.py":
+                if f.get("depends_on"):
+                    f["depends_on"] = []
+                    print("✅ Enforced: backend/models.py moved to Wave 1 (depends_on: [])")
+                break
+        # ─────────────────────────────────────────────────────────────────────────
+
+        # Auto-add extra components from App.js description
         app_js_entry = next((f for f in blueprint["files"] if f["path"] == "frontend/src/App.js"), None)
         if app_js_entry:
             existing_paths = [f["path"] for f in blueprint["files"]]
@@ -278,7 +311,7 @@ def generate_blueprint(project_description):
                         "depends_on": ["frontend/src/api.js"]
                     })
 
-        # Remove ghost routing files — React Router concepts, not real components
+        # Remove ghost routing files
         GHOST_FILES = {
             "frontend/src/components/Routing.js",
             "frontend/src/components/Router.js",
@@ -291,8 +324,7 @@ def generate_blueprint(project_description):
         }
         blueprint["files"] = [f for f in blueprint["files"] if f["path"] not in GHOST_FILES]
 
-        # Always inject backend/__init__.py — Python won't treat backend/ as a package without it
-        # This prevents "from backend import db, jwt" from crashing at startup
+        # Always inject backend/__init__.py
         existing_paths = {f["path"] for f in blueprint["files"]}
         if "backend/__init__.py" not in existing_paths:
             blueprint["files"].insert(0, {
@@ -301,7 +333,7 @@ def generate_blueprint(project_description):
                 "depends_on": []
             })
 
-        # Sort files by dependency order
+        # Sort files by dependency order (Wave assignment)
         blueprint["files"] = sorted(
             blueprint["files"],
             key=lambda f: len(f.get("depends_on", []))
@@ -320,14 +352,11 @@ def generate_blueprint(project_description):
         return None
 
 
-
-# Test it
 if __name__ == "__main__":
     blueprint = generate_blueprint(
         "A real-time chat app where users can create rooms and send messages"
     )
     if blueprint:
-        import os
         os.makedirs("sandbox", exist_ok=True)
         with open("sandbox/blueprint.json", "w") as f:
             json.dump(blueprint, f, indent=2)
