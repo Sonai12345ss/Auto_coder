@@ -652,6 +652,17 @@ def check_cross_file_consistency(files):
                 })
 
     # Cross-file import check
+    # BUG-6 FIX: The LLM sometimes generates App.js importing from './pages/...'
+    # even though all components live in './components/...'. The old check only
+    # looked up component_names (from components/ paths), so every page import
+    # fired a false-positive missing_component error. Now we also accept:
+    #   - imports from paths containing 'pages/' as valid (treat as alias for components/)
+    #   - component_names includes basenames from both components/ AND pages/ dirs
+    extended_component_names = set(component_names)
+    for path in file_paths:
+        if path.startswith("frontend/src/pages/") and path.endswith(".js"):
+            extended_component_names.add(os.path.basename(path).replace(".js", ""))
+
     for path, code in files.items():
         if not (path.endswith(".js") or path.endswith(".jsx")):
             continue
@@ -661,16 +672,23 @@ def check_cross_file_consistency(files):
                 imported_name = match.group(1)
                 import_path = match.group(2)
                 if import_path.startswith("./") or import_path.startswith("../"):
+                    # Skip api imports
                     if re.search(r"[./]api[./]?", import_path) or import_path.endswith("/api"):
                         continue
+                    # Skip named api exports
                     if imported_name in api_exports:
                         continue
+                    # Skip React Router / React built-ins
                     if imported_name in (
                         "React", "useState", "useEffect", "useNavigate", "useParams",
                         "Link", "Routes", "Route", "BrowserRouter", "Navigate", "Outlet"
                     ):
                         continue
-                    if imported_name not in component_names:
+                    # Skip imports from pages/ — treat as valid component alias
+                    if "/pages/" in import_path:
+                        continue
+                    # Check against both components/ and pages/ component names
+                    if imported_name not in extended_component_names:
                         errors.append({
                             "file": path,
                             "type": "missing_component",
@@ -687,6 +705,18 @@ def check_cross_file_consistency(files):
 def run_tests(files):
     all_errors = []
 
+    # ── Minimum viable size thresholds (bytes) ───────────────────────────
+    # Files below these thresholds have content but are clearly incomplete.
+    # They won't trigger empty_file (len > 0) but are broken stubs.
+    # BUG-2 FIX: Catches the models.py=256 bytes failure mode where the
+    # builder gave up after 3 syntax-error retries and wrote a partial stub.
+    UNDERSIZED_THRESHOLDS = {
+        "backend/models.py":  500,   # minimum: 1 model class with fields
+        "backend/routes.py":  800,   # minimum: register + login routes
+        "backend/app.py":     300,   # minimum: create_app() factory
+        "frontend/src/api.js": 400,  # minimum: axios instance + 1 interceptor
+    }
+
     for file_path, code in files.items():
         if not code or not code.strip():
             all_errors.append({
@@ -696,6 +726,23 @@ def run_tests(files):
                 "line": None,
             })
             continue
+
+        # Check for undersized (incomplete stub) before any other checks
+        threshold = UNDERSIZED_THRESHOLDS.get(file_path)
+        if threshold and len(code.encode()) < threshold:
+            all_errors.append({
+                "file": file_path,
+                "type": "undersized_file",
+                "message": (
+                    f"{file_path} is only {len(code.encode())} bytes — clearly incomplete "
+                    f"(minimum viable size is {threshold} bytes). The builder likely gave up "
+                    f"after syntax-error retries and left a partial stub. "
+                    f"Regenerate the entire file from scratch."
+                ),
+                "line": None,
+            })
+            # Still run other checks — there may be syntax errors too
+
 
         if file_path.endswith(".py"):
             syntax_err = test_python_syntax(file_path, code)

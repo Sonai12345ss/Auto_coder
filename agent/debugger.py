@@ -111,6 +111,18 @@ ERROR_BUCKETS = {
             "truncated_component", "truncated_api", "critical_missing_export",
             "critical_missing_component", "critical_missing_router", "empty_file",
             "app_js_api_import", "navbar_outside_router", "private_route_wrong_pattern",
+            # ── BUG-1 FIX ──────────────────────────────────────────────────────────
+            # phantom_backend_api MOVED HERE from "import" bucket.
+            # When backend.api is phantom-imported, the ENTIRE file body is written
+            # around non-existent functions (loginUser, getProducts, etc.).
+            # Stripping just the import line (import_fix strategy) leaves dangling
+            # undefined calls throughout — making the file syntactically corrupt.
+            # A full_rewrite is the only safe recovery: rewrite routes.py from
+            # scratch using db + models directly, as the backend prompt requires.
+            "phantom_backend_api",
+            # undersized_file: file has content but is clearly incomplete (< minimum
+            # viable size for the file type). Needs a full LLM regeneration.
+            "undersized_file",
         ],
         "strategy": "full_rewrite",
         "max_tokens": 4096,
@@ -133,7 +145,8 @@ ERROR_BUCKETS = {
     },
     "import": {
         "types": [
-            "phantom_backend_api", "duplicate_db_instance", "missing_import",
+            # phantom_backend_api removed — moved to structural (see above)
+            "duplicate_db_instance", "missing_import",
             "bad_import", "missing_component", "css_import",
         ],
         "strategy": "import_fix",
@@ -487,7 +500,16 @@ def apply_rule_based_fixes(file_path, code, errors):
         ("missing_tailwind",         lambda c: autofix_missing_tailwind(c)),
         ("missing_root_div",         lambda c: autofix_missing_root_div(c)),
         ("missing_import",           lambda c: autofix_missing_jwt_import(c)),
-        ("phantom_backend_api",      lambda c: autofix_phantom_backend_api(c)),
+        # ── BUG-5 FIX ────────────────────────────────────────────────────────
+        # phantom_backend_api is intentionally NOT in this fixer list.
+        # autofix_phantom_backend_api strips only the "from backend.api import"
+        # line — but leaves all the phantom function calls (loginUser,
+        # getProducts, etc.) intact throughout the file body. Running this
+        # rule-based fix BEFORE the LLM sees the file makes the damage worse:
+        # the file now has undefined references at every callsite, which the
+        # surgical import_fix prompt cannot recover because it only sees the
+        # first 25 lines. phantom_backend_api is now in the structural bucket
+        # and handled exclusively by the full_rewrite LLM strategy.
         ("duplicate_db_instance",    lambda c: autofix_duplicate_db(c, file_path)),
         ("duplicate_index_name",     lambda c: autofix_duplicate_index_names(c)),
         ("missing_proxy",            lambda c: autofix_missing_proxy(c)),
@@ -553,8 +575,28 @@ Result: zero fetch('/api/...) calls remain.
 """
     if "phantom_backend_api" in error_types:
         extra += """
-FIX: Remove 'from backend.api import ...' — backend/api.py does not exist.
-Use: from backend.models import ...; from backend import db
+CRITICAL — PHANTOM BACKEND API FULL REWRITE:
+backend/api.py does NOT exist. The entire routes.py was written using phantom
+functions (loginUser, getCurrentUser, getProducts, placeOrder, etc.) that don't exist.
+You must REWRITE routes.py completely from scratch using ONLY:
+  - from backend import db
+  - from backend.models import User, Product, Order, OrderItem (adjust to actual models)
+  - Direct SQLAlchemy queries: User.query.filter_by(...).first(), db.session.add(...), etc.
+  - create_access_token(identity=user.id) for JWT
+
+CORRECT registration pattern:
+  new_user = User(username=data['username'], email=data['email'])
+  new_user.set_password(data['password'])
+  db.session.add(new_user)
+  db.session.commit()
+
+CORRECT login pattern:
+  user = User.query.filter_by(username=data['username']).first()
+  if user and user.check_password(data['password']):
+      token = create_access_token(identity=user.id)
+      return jsonify({'token': token, 'user': user.to_dict()}), 200
+
+ZERO phantom function calls must remain. Every route handler must use SQLAlchemy directly.
 """
     if "duplicate_db_instance" in error_types:
         extra += """
@@ -579,7 +621,14 @@ FIX: App.js must be a pure router:
 - <Navbar /> inside <BrowserRouter>
 - PrivateRoute Outlet pattern: <Route element={<PrivateRoute />}><Route path=... /></Route>
 """
-    if "truncated_component" in error_types or "truncated_api" in error_types:
+    if "undersized_file" in error_types:
+        file_name = os.path.basename(file_path)
+        extra += f"""
+CRITICAL — UNDERSIZED FILE FULL REWRITE:
+{file_path} was generated but is clearly incomplete (too few bytes to be a valid file).
+You must write the COMPLETE, PRODUCTION-READY {file_name} from scratch.
+Do NOT produce a partial stub. Write every class, every method, every route handler.
+"""
         component_name = os.path.basename(file_path).replace(".js", "")
         extra += f"""
 FIX: File was truncated. Write ALL steps:
@@ -774,13 +823,35 @@ def debug_files(files, test_result):
 
     print(f"\n🔧 DEBUGGER: Fixing {test_result['error_count']} error(s)...")
 
-    # Remove rogue files
+    # ── Remove rogue files at wrong paths ──────────────────────────────────
     ROGUE_PATHS = {"frontend/api.js", "frontend/api/rooms.js",
                    "frontend/api/messages.js", "frontend/api/users.js"}
     for rogue in list(ROGUE_PATHS):
         if rogue in files:
             del files[rogue]
             print(f"  🗑️  Removed rogue file: {rogue}")
+
+    # ── BUG-7 FIX: Remove ghost component files ──────────────────────────
+    # The planner sometimes generates guard/utility components that are not
+    # real page components (Required.js, Auth.js, Guard.js, etc.). These
+    # ghost files confuse cross-file checks and waste debugger cycles.
+    # Detect them: component files in frontend/src/components/ whose name
+    # matches known non-page guard words AND are thin (< 50 lines).
+    GHOST_COMPONENT_NAMES = {
+        "Required", "Auth", "Guard", "Private", "Loading", "Error",
+        "Modal", "Base", "Common", "Utils", "Helper", "Shared", "Wrapper",
+    }
+    for path in list(files.keys()):
+        if not path.startswith("frontend/src/components/") or not path.endswith(".js"):
+            continue
+        component_name = os.path.basename(path).replace(".js", "")
+        if component_name in GHOST_COMPONENT_NAMES:
+            code_lines = (files[path] or "").split("\n")
+            # Only remove if it's thin AND not a legitimate PrivateRoute
+            if len(code_lines) < 60 and "Outlet" not in (files[path] or ""):
+                del files[path]
+                print(f"  🗑️  Removed ghost component: {path} ('{component_name}' is a guard/utility name, {len(code_lines)} lines)")
+
 
     errors_by_file = {}
     for error in test_result["errors"]:
