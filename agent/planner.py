@@ -3,6 +3,7 @@ import re
 import json
 import time
 import threading
+from collections import deque
 from datetime import datetime, timedelta
 from groq import Groq
 from openai import OpenAI
@@ -13,17 +14,14 @@ load_dotenv()
 # ═══════════════════════════════════════════════════════════════
 # PLANNER HEALTH TRACKER
 #
-# Root cause from build log: the builder hammers all Gemini
-# providers across its waves, putting them on 120s cooldown.
-# When the planner runs (same process, ~2 min later), Gemini
-# providers are still blocked — but the planner has no health
-# state, so it blindly retries all 6 Gemini providers and waits
-# 1+2+4+8+1+2 = 18 seconds before finally reaching Groq.
+# Tracks rate-limited providers so they are skipped on the next
+# call rather than retried blindly. The builder exhausts Gemini
+# across its waves (120s cooldown); the planner seeing those same
+# providers blocked wastes 18s of useless retries without this.
 #
-# Fix: a shared health tracker that the planner uses to skip
-# already-blocked providers. The builder's ProviderHealth is a
-# separate instance — this one is for the planner only, but it
-# reads the same cooldown logic.
+# FIX 2 (improved reset): When ALL providers are blocked, wait
+# for the shortest remaining cooldown before resetting, rather
+# than resetting instantly (which just re-fails immediately).
 # ═══════════════════════════════════════════════════════════════
 
 class _PlannerHealth:
@@ -31,13 +29,28 @@ class _PlannerHealth:
         self._blocked_until = {}
         self._lock = threading.Lock()
 
-    def block(self, name, seconds=120):
+    def block(self, name, seconds):
         with self._lock:
             self._blocked_until[name] = datetime.now() + timedelta(seconds=seconds)
 
     def is_available(self, name):
         with self._lock:
             return datetime.now() >= self._blocked_until.get(name, datetime.min)
+
+    def soonest_available_in(self):
+        """Return seconds until the soonest blocked provider becomes available."""
+        with self._lock:
+            now = datetime.now()
+            waits = [(bt - now).total_seconds() for bt in self._blocked_until.values() if bt > now]
+            return min(waits) if waits else 0
+
+    def reset_non_gemini(self):
+        """Reset only Groq/OpenRouter/Doubleword — they recover faster than Gemini."""
+        with self._lock:
+            self._blocked_until = {
+                k: v for k, v in self._blocked_until.items()
+                if "gemini" in k.lower()
+            }
 
     def reset(self):
         with self._lock:
@@ -49,46 +62,46 @@ _health = _PlannerHealth()
 # ═══════════════════════════════════════════════════════════════
 # PROVIDER SETUP
 #
-# ORDER RATIONALE (from build log analysis):
-# The builder runs before the planner returns, exhausting all
-# Gemini providers across its waves. By the time generate_blueprint
-# is called, all 6 Gemini Pro/Flash slots are on 120s cooldown.
-# Placing Groq first means the planner succeeds on attempt 1
-# without wasting ~18 seconds on blocked Gemini providers.
-# Gemini is kept as fallback for when Groq is also rate limited.
+# FIX 3 (timeout=45.0): Without a timeout, a provider that hangs
+# stalls the entire build on Render's free tier indefinitely.
+# 45s is generous enough for large JSON responses (planner needs
+# to return 3000+ token blueprints) while still being a reasonable
+# hard cutoff.
+#
+# ORDER: Groq first (fresh when Gemini is exhausted post-build),
+# then Gemini Flash (good JSON quality), Gemini Pro last (best
+# quality but most rate-limited), then smaller fallbacks.
 # ═══════════════════════════════════════════════════════════════
 
-groq1      = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
-groq2      = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""))
-groq3      = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""))
-gemini1    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY", ""))
-gemini2    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_2", ""))
-gemini3    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_3", ""))
-openrouter = OpenAI(base_url="https://openrouter.ai/api/v1",  api_key=os.environ.get("OPENROUTER_API_KEY", ""))
-doubleword = OpenAI(base_url="https://api.doubleword.ai/v1",  api_key=os.environ.get("DOUBLEWORD_API_KEY", ""))
+_TIMEOUT = 45.0   # seconds — FIX 3: prevents infinite hangs
+_MAX_TOKENS = 8192  # e-commerce blueprints need ~3000 tokens; 4096 caused truncation
 
-# max_tokens=8192: e-commerce blueprints with 24+ files need ~3000 tokens of
-# JSON output. At 4096, the model hits the limit mid-JSON (char ~9700) and
-# produces unterminated strings. 8192 gives headroom for 30-file blueprints.
-_MAX_TOKENS = 8192
+groq1      = Groq(api_key=os.environ.get("GROQ_API_KEY", ""),      timeout=_TIMEOUT)
+groq2      = Groq(api_key=os.environ.get("GROQ_API_KEY_2", ""),    timeout=_TIMEOUT)
+groq3      = Groq(api_key=os.environ.get("GROQ_API_KEY_3", ""),    timeout=_TIMEOUT)
+gemini1    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY", ""),   timeout=_TIMEOUT)
+gemini2    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_2", ""), timeout=_TIMEOUT)
+gemini3    = OpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=os.environ.get("GEMINI_API_KEY_3", ""), timeout=_TIMEOUT)
+openrouter = OpenAI(base_url="https://openrouter.ai/api/v1",  api_key=os.environ.get("OPENROUTER_API_KEY", ""), timeout=_TIMEOUT)
+doubleword = OpenAI(base_url="https://api.doubleword.ai/v1",  api_key=os.environ.get("DOUBLEWORD_API_KEY", ""), timeout=_TIMEOUT)
 
 PROVIDERS = [
-    # ── Groq first: always available when Gemini is exhausted post-build ──
+    # Groq first — available when Gemini is exhausted from builder waves
     ("Groq-1 / llama-3.3-70b",      lambda m: groq1.chat.completions.create(model="llama-3.3-70b-versatile", messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
     ("Groq-2 / llama-3.3-70b",      lambda m: groq2.chat.completions.create(model="llama-3.3-70b-versatile", messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
     ("Groq-3 / llama-3.3-70b",      lambda m: groq3.chat.completions.create(model="llama-3.3-70b-versatile", messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
-    # ── Gemini Flash: good JSON quality, usually available after Groq ──────
+    # Gemini Flash: good JSON quality, faster quota recovery than Pro
     ("Gemini-1 / gemini-2.5-flash",  lambda m: gemini1.chat.completions.create(model="gemini-2.5-flash",  messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
     ("Gemini-2 / gemini-2.5-flash",  lambda m: gemini2.chat.completions.create(model="gemini-2.5-flash",  messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
     ("Gemini-3 / gemini-2.5-flash",  lambda m: gemini3.chat.completions.create(model="gemini-2.5-flash",  messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
-    # ── Gemini Pro: best JSON quality but most likely to be rate limited ───
+    # Gemini Pro: best JSON quality but most rate-limited
     ("Gemini-1 / gemini-2.5-pro",    lambda m: gemini1.chat.completions.create(model="gemini-2.5-pro",    messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
     ("Gemini-2 / gemini-2.5-pro",    lambda m: gemini2.chat.completions.create(model="gemini-2.5-pro",    messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
     ("Gemini-3 / gemini-2.5-pro",    lambda m: gemini3.chat.completions.create(model="gemini-2.5-pro",    messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
-    # ── Smaller/fast models: for fallback only ─────────────────────────────
-    ("Groq-1 / llama-3.1-8b",        lambda m: groq1.chat.completions.create(model="llama-3.1-8b-instant",   messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
-    ("Groq-2 / llama-3.1-8b",        lambda m: groq2.chat.completions.create(model="llama-3.1-8b-instant",   messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
-    ("Groq-3 / llama-3.1-8b",        lambda m: groq3.chat.completions.create(model="llama-3.1-8b-instant",   messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
+    # Smaller/fast fallbacks
+    ("Groq-1 / llama-3.1-8b",        lambda m: groq1.chat.completions.create(model="llama-3.1-8b-instant",    messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
+    ("Groq-2 / llama-3.1-8b",        lambda m: groq2.chat.completions.create(model="llama-3.1-8b-instant",    messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
+    ("Groq-3 / llama-3.1-8b",        lambda m: groq3.chat.completions.create(model="llama-3.1-8b-instant",    messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
     ("Gemini-1 / gemini-2.0-flash",  lambda m: gemini1.chat.completions.create(model="gemini-2.0-flash",  messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
     ("Gemini-2 / gemini-2.0-flash",  lambda m: gemini2.chat.completions.create(model="gemini-2.0-flash",  messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
     ("Gemini-3 / gemini-2.0-flash",  lambda m: gemini3.chat.completions.create(model="gemini-2.0-flash",  messages=m, temperature=0.2, max_tokens=_MAX_TOKENS)),
@@ -102,19 +115,29 @@ PROVIDERS = [
 
 def call_llm(messages):
     """
-    Call providers in order, skipping any that are health-blocked.
-    On rate limit: block the provider and immediately try the next one
-    (no sleep — the next provider in the list is already different).
-    Sleep only when all available providers are exhausted.
+    Call providers in order, skipping health-blocked ones.
+    On rate limit: block that provider and immediately try the next.
+    
+    FIX 2 (improved reset): When ALL providers are blocked, wait for the
+    soonest non-Gemini recovery (Groq recovers in 60s, not 120s) rather
+    than resetting instantly and failing again immediately.
     """
     available = [p for p in PROVIDERS if _health.is_available(p[0])]
     if not available:
-        print("  ⚠️  All planner providers in cooldown — resetting health and retrying...")
-        _health.reset()
-        available = PROVIDERS
+        wait = _health.soonest_available_in()
+        if wait > 0:
+            actual_wait = min(wait, 30)  # cap at 30s — Groq recovers in 60s total
+            print(f"  ⚠️  All planner providers in cooldown — waiting {actual_wait:.0f}s for recovery...")
+            time.sleep(actual_wait)
+        _health.reset_non_gemini()  # reset only Groq/OR/DW; keep Gemini blocked
+        available = [p for p in PROVIDERS if _health.is_available(p[0])]
+        if not available:
+            # Groq still blocked — full reset as last resort
+            _health.reset()
+            available = PROVIDERS
 
     last_error = None
-    for attempt, (name, fn) in enumerate(available):
+    for name, fn in available:
         try:
             print(f"  🤖 Planner using {name}...")
             return fn(messages)
@@ -125,6 +148,12 @@ def call_llm(messages):
                 cooldown = 120 if "gemini" in name.lower() else 60
                 _health.block(name, seconds=cooldown)
                 print(f"  ⚠️  {name} rate limited (blocked {cooldown}s), trying next...")
+                last_error = e
+                continue
+            elif any(x in err for x in ["timeout", "timed out", "read timeout"]):
+                # FIX 3: timeout hit — block briefly and move to next provider
+                _health.block(name, seconds=30)
+                print(f"  ⚠️  {name} timed out after {_TIMEOUT}s, trying next...")
                 last_error = e
                 continue
             elif any(x in err for x in ["decommission", "deprecated", "no longer supported",
@@ -142,20 +171,12 @@ def call_llm(messages):
 
 # ═══════════════════════════════════════════════════════════════
 # JSON TRUNCATION REPAIR
-#
-# When a model hits its token limit mid-JSON (typically at char
-# ~9000-9700 for a 24-file blueprint), the output is syntactically
-# valid up to the truncation point but missing closing brackets.
-# This function closes any open structures so json.loads can parse
-# the partial result. _enforce_required_files() then fills in any
-# missing required files from the partial blueprint.
 # ═══════════════════════════════════════════════════════════════
 
 def _try_repair_json(raw):
     """
-    Attempt to repair truncated JSON by closing unclosed structures.
+    Close unclosed JSON structures from token-limit truncation.
     Returns (repaired_string, was_repaired: bool).
-    Only works for truncation — won't fix structural JSON errors.
     """
     s = raw.strip()
     stack = []
@@ -181,18 +202,13 @@ def _try_repair_json(raw):
                 stack.pop()
 
     if not stack:
-        return s, False  # Already closed (valid or unfixable structural error)
+        return s, False
 
-    # Close any mid-string truncation
     if in_string:
         s += '"'
-
-    # Remove trailing comma before closing
     s = s.rstrip()
     if s.endswith(','):
         s = s[:-1]
-
-    # Close open structures in reverse order
     closing = {'{': '}', '[': ']'}
     for opener in reversed(stack):
         s += closing[opener]
@@ -201,48 +217,116 @@ def _try_repair_json(raw):
 
 
 # ═══════════════════════════════════════════════════════════════
-# GHOST COMPONENT FILTERING
+# FIX 4 — BLUEPRINT SCHEMA VALIDATION
 #
-# Two sources of ghost components:
-# 1. LLM generates them directly (covered by GHOST_FILE_PATHS)
-# 2. _auto_add_missing_components() adds them from PascalCase
-#    words in descriptions (covered by EXCLUDED_COMPONENT_NAMES)
+# json.loads can succeed even when the blueprint is structurally
+# wrong — missing keys, wrong types, empty files list.
+# A lightweight validation pass catches these before post-processing
+# tries to iterate over None or missing sections.
 # ═══════════════════════════════════════════════════════════════
 
+def _validate_blueprint(blueprint):
+    """
+    Lightweight structural validation — no external dependencies.
+    Returns (is_valid: bool, errors: list[str]).
+    
+    Checks:
+    - Required top-level keys exist and have correct types
+    - files list has at least 5 entries (< 5 = almost certainly truncated)
+    - Each file entry has path (str), description (str), depends_on (list)
+    - No duplicate file paths
+    - api_endpoints is a non-empty list
+    """
+    errors = []
+
+    # Top-level keys
+    required_keys = {
+        "project_name": str,
+        "description": str,
+        "stack": dict,
+        "files": list,
+        "database_schema": dict,
+        "api_endpoints": list,
+    }
+    for key, expected_type in required_keys.items():
+        if key not in blueprint:
+            errors.append(f"Missing top-level key: '{key}'")
+        elif not isinstance(blueprint[key], expected_type):
+            errors.append(f"'{key}' must be {expected_type.__name__}, got {type(blueprint[key]).__name__}")
+
+    if errors:
+        return False, errors
+
+    # files list minimum size
+    files = blueprint["files"]
+    if len(files) < 5:
+        errors.append(f"files list has only {len(files)} entries — blueprint is likely truncated (minimum 5)")
+
+    # Each file entry structure
+    seen_paths = set()
+    for i, f in enumerate(files):
+        if not isinstance(f, dict):
+            errors.append(f"files[{i}] is not an object")
+            continue
+        if "path" not in f or not isinstance(f["path"], str) or not f["path"]:
+            errors.append(f"files[{i}] missing or invalid 'path'")
+        elif f["path"] in seen_paths:
+            errors.append(f"Duplicate file path: '{f['path']}'")
+        else:
+            seen_paths.add(f["path"])
+        if "depends_on" not in f or not isinstance(f["depends_on"], list):
+            errors.append(f"files[{i}] ('{f.get('path', '?')}') missing or invalid 'depends_on'")
+
+    # api_endpoints non-empty
+    if len(blueprint["api_endpoints"]) == 0:
+        errors.append("api_endpoints is empty — must include at least /api/register, /api/login, /api/user")
+
+    return len(errors) == 0, errors
+
+
+# ═══════════════════════════════════════════════════════════════
+# GHOST COMPONENT FILTERING
+# ═══════════════════════════════════════════════════════════════
+
+# FIX 1 (expanded exclusion set): The auto-add regex catches all PascalCase
+# words in descriptions — including data model names like User, Token, Database.
+# Expanding this set prevents ghost component files from being created.
 EXCLUDED_COMPONENT_NAMES = {
     # React Router / React internals
     "React", "Route", "Routes", "BrowserRouter", "Navigate", "Outlet",
     "Link", "NavLink", "Switch", "RouterProvider", "Redirect",
-    # Structural / layout (always handled elsewhere)
+    # Structural / layout
     "App", "Router", "Routing", "Component", "Fragment",
     "Provider", "Context", "Suspense", "Layout", "Footer", "Navbar",
-    # Auth guard duplicates (PrivateRoute is the canonical one)
-    # Note: PrivateRoute itself is intentionally absent — it's a real template
+    # Auth guard duplicates (PrivateRoute is canonical — intentionally absent)
     "Protected", "AuthRoute", "GuardedRoute",
-    # BUG-4: guard/utility words from descriptions
+    # Guard / utility words from descriptions
     "Required", "Auth", "Guard", "Private",
     "Loading", "Error", "Modal", "Alert", "Toast",
     "Base", "Common", "Utils", "Helper", "Shared", "Wrapper",
     "Index", "NotFound", "Fallback",
-    # From build log: Groq-generated non-standard names that are duplicates
-    # or generic placeholders rather than real page components:
-    # "Main" → too generic; real component should be MainContent, MainPage, etc.
-    # "Registration" → near-duplicate of "Register" (already in REQUIRED_FILES)
+    # From build logs: Groq-generated generic names
     "Main", "Registration",
+    # FIX 1: data-model / technical names that appear in descriptions but
+    # are NOT React components — e.g. "handles User authentication" → User.js
+    "User", "Token", "Database", "Api", "Jwt", "Http", "Url", "Id", "Uuid",
+    "String", "Integer", "Boolean", "Object", "Array", "Dict",
+    "Config", "Schema", "Model", "Service", "Handler",
+    "Manager", "Controller", "Middleware", "Decorator",
+    "Request", "Response", "Session", "Cookie", "Header",
+    "Password", "Email", "Username", "Role", "Permission",
+    "Status", "Type", "Category", "Tag", "Label", "Badge",
 }
 
 GHOST_FILE_PATHS = {
-    # Routing wrapper files (routing lives in App.js)
     "frontend/src/components/Routing.js",
     "frontend/src/components/Router.js",
     "frontend/src/components/Routes.js",
     "frontend/src/Routing.js",
     "frontend/src/Router.js",
-    # Auth guard duplicates
     "frontend/src/components/Protected.js",
     "frontend/src/components/AuthRoute.js",
     "frontend/src/components/GuardedRoute.js",
-    # BUG-4 utility/guard names
     "frontend/src/components/Required.js",
     "frontend/src/components/Auth.js",
     "frontend/src/components/Guard.js",
@@ -256,40 +340,36 @@ GHOST_FILE_PATHS = {
     "frontend/src/components/NotFound.js",
     "frontend/src/components/Fallback.js",
     "frontend/src/components/Index.js",
-    # From build log: Groq-generated generics
     "frontend/src/components/Main.js",
     "frontend/src/components/Registration.js",
+    # FIX 1: data-model ghost paths
+    "frontend/src/components/User.js",
+    "frontend/src/components/Token.js",
+    "frontend/src/components/Database.js",
+    "frontend/src/components/Model.js",
+    "frontend/src/components/Schema.js",
+    "frontend/src/components/Config.js",
+    "frontend/src/components/Api.js",
+    "frontend/src/components/Service.js",
 }
 
 
 def filter_ghost_components(files_list):
-    """
-    Two-pass filter:
-    Pass 1: Remove files whose full path is in GHOST_FILE_PATHS.
-    Pass 2: Remove components/ files whose base name is in EXCLUDED_COMPONENT_NAMES.
-    PrivateRoute.js is intentionally preserved (not in either set).
-    """
     filtered = []
     removed = []
-
     for file_info in files_list:
         path = file_info.get("path", "")
-
         if path in GHOST_FILE_PATHS:
             removed.append(path)
             continue
-
         if path.startswith("frontend/src/components/") and path.endswith(".js"):
             name = os.path.basename(path).replace(".js", "")
             if name in EXCLUDED_COMPONENT_NAMES:
                 removed.append(path)
                 continue
-
         filtered.append(file_info)
-
     if removed:
         print(f"  🧹 Filtered {len(removed)} ghost file(s): {[os.path.basename(p) for p in removed]}")
-
     return filtered
 
 
@@ -432,11 +512,10 @@ REQUIRED_FILES = [
 
 
 # ─────────────────────────────────────────────
-# POST-PROCESSING PIPELINE STEPS
+# POST-PROCESSING PIPELINE
 # ─────────────────────────────────────────────
 
 def _enforce_required_files(blueprint):
-    """Add any missing required files to the blueprint."""
     existing_paths = {f["path"] for f in blueprint["files"]}
     for required in REQUIRED_FILES:
         if required not in existing_paths:
@@ -449,11 +528,7 @@ def _enforce_required_files(blueprint):
 
 
 def _enforce_models_wave1(blueprint):
-    """
-    Force backend/models.py to depends_on: [] so it builds in Wave 1.
-    In Wave 1 all providers are fresh. In Wave 2 (alongside 9+ parallel
-    components) provider rate limits cause all 3 builder retries to fail.
-    """
+    """Force backend/models.py to depends_on: [] — builds in Wave 1 when providers are fresh."""
     for f in blueprint["files"]:
         if f["path"] == "backend/models.py":
             if f.get("depends_on"):
@@ -464,20 +539,15 @@ def _enforce_models_wave1(blueprint):
 
 def _auto_add_missing_components(blueprint):
     """
-    Scan App.js description for PascalCase component names that are referenced
-    but not yet in the files list. Auto-add them so the builder doesn't hit
-    missing_component errors during tester validation.
-
-    Only adds names NOT in EXCLUDED_COMPONENT_NAMES, preventing ghost files
-    like Registration.js, Main.js, Auth.js from being generated.
+    Scan App.js description for PascalCase names not yet in files list.
+    FIX 1: EXCLUDED_COMPONENT_NAMES is now much larger to prevent data-model
+    names (User, Token, Database) from becoming ghost component files.
     """
     app_entry = next((f for f in blueprint["files"] if f["path"] == "frontend/src/App.js"), None)
     if not app_entry:
         return
 
     existing_paths = {f["path"] for f in blueprint["files"]}
-
-    # Scan App.js description + all component descriptions for referenced names
     desc = app_entry.get("description", "")
     for f in blueprint["files"]:
         if "components/" in f.get("path", ""):
@@ -500,7 +570,6 @@ def _auto_add_missing_components(blueprint):
 
 
 def _ensure_init_py(blueprint):
-    """backend/__init__.py must always exist (sometimes filtered out or missing)."""
     existing_paths = {f["path"] for f in blueprint["files"]}
     if "backend/__init__.py" not in existing_paths:
         blueprint["files"].insert(0, {
@@ -510,16 +579,52 @@ def _ensure_init_py(blueprint):
         })
 
 
-def _sort_by_wave(blueprint):
+def _topological_sort(blueprint):
     """
-    Sort files by dependency depth so the wave builder processes them correctly.
-    0 deps → Wave 1 (providers fresh). 1 dep → Wave 2. 2+ deps → Wave 3+.
-    Stable sort preserves relative order within the same wave.
+    FIX 5: Kahn's algorithm topological sort — replaces the naive len(depends_on) sort.
+
+    Old sort: key=len(depends_on) — WRONG for A→B→C chains where all have 1 dep.
+    New sort: proper topological order matching what builder.py's get_waves() expects.
+
+    Example: __init__.py → models.py → routes.py → app.py
+    Old: [__init__(0), models(0), routes(1), app(3)] — correct by coincidence
+    Real win: A(1)→B(1)→C(1) chain — old sort fails, new sort gives A, B, C.
+
+    Falls back to dep-count sort if a dependency cycle is detected.
     """
-    blueprint["files"] = sorted(
-        blueprint["files"],
-        key=lambda f: len(f.get("depends_on", [])),
-    )
+    files = blueprint["files"]
+    path_to_file = {f["path"]: f for f in files}
+    all_paths = set(path_to_file.keys())
+
+    # Build in-degree and dependent adjacency
+    in_degree = {p: 0 for p in all_paths}
+    dependents = {p: [] for p in all_paths}
+
+    for f in files:
+        for dep in f.get("depends_on", []):
+            if dep in all_paths:  # Only count deps that exist in the blueprint
+                in_degree[f["path"]] += 1
+                dependents[dep].append(f["path"])
+
+    # Process nodes with 0 in-degree (Kahn's BFS)
+    queue = deque(sorted(p for p in all_paths if in_degree[p] == 0))
+    sorted_paths = []
+
+    while queue:
+        path = queue.popleft()
+        sorted_paths.append(path)
+        for dependent in sorted(dependents[path]):  # sorted for determinism
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                queue.append(dependent)
+
+    if len(sorted_paths) != len(files):
+        # Cycle detected — fall back to dep-count sort (always safe)
+        print("  ⚠️  Dependency cycle detected in blueprint — using dep-count fallback")
+        blueprint["files"] = sorted(files, key=lambda f: len(f.get("depends_on", [])))
+        return
+
+    blueprint["files"] = [path_to_file[p] for p in sorted_paths]
 
 
 def _process_blueprint(blueprint):
@@ -529,7 +634,7 @@ def _process_blueprint(blueprint):
     blueprint["files"] = filter_ghost_components(blueprint["files"])
     _auto_add_missing_components(blueprint)
     _ensure_init_py(blueprint)
-    _sort_by_wave(blueprint)
+    _topological_sort(blueprint)  # FIX 5: was _sort_by_wave (naive len sort)
     return blueprint
 
 
@@ -541,10 +646,15 @@ def generate_blueprint(project_description, max_attempts=3):
     """
     Generate a project blueprint with up to max_attempts retries.
 
-    On JSON parse failure: attempts _try_repair_json() first (handles
-    token-limit truncation). If repair also fails, retries with a fresh
-    provider call. A partial repaired blueprint is still useful because
-    _enforce_required_files() fills in any missing required files.
+    Flow per attempt:
+    1. call_llm() — health-aware provider selection
+    2. Strip markdown fences
+    3. json.loads() — try parse
+    4. If parse fails → _try_repair_json() — close truncated brackets
+    5. _validate_blueprint() — FIX 4: check structural correctness
+    6. If invalid → retry with next attempt
+    7. _process_blueprint() — enforce, filter, sort
+    8. Return complete blueprint
     """
     print("\n🧠 Planner Agent thinking...")
 
@@ -575,13 +685,13 @@ def generate_blueprint(project_description, max_attempts=3):
 
         raw = response.choices[0].message.content.strip()
 
-        # Strip markdown fences if model added them despite instructions
+        # Strip markdown fences
         if "```json" in raw:
             raw = raw.split("```json")[1].split("```")[0].strip()
         elif "```" in raw:
             raw = raw.split("```")[1].split("```")[0].strip()
 
-        # ── Parse with repair fallback ──────────────────────────────────────
+        # Step 1: Parse JSON (with truncation repair fallback)
         blueprint = None
         try:
             blueprint = json.loads(raw)
@@ -603,9 +713,20 @@ def generate_blueprint(project_description, max_attempts=3):
                 continue
             print("  ❌ Planner failed after all attempts")
             return None
-        # ────────────────────────────────────────────────────────────────────
 
-        # Post-processing pipeline
+        # Step 2: FIX 4 — Validate structure before post-processing
+        is_valid, validation_errors = _validate_blueprint(blueprint)
+        if not is_valid:
+            print(f"  ⚠️  Attempt {attempt}: blueprint validation failed:")
+            for err in validation_errors:
+                print(f"    - {err}")
+            if attempt < max_attempts:
+                time.sleep(2)
+                continue
+            # On last attempt: still try to salvage with post-processing
+            print("  ⚠️  Proceeding with invalid blueprint — post-processing will patch gaps")
+
+        # Step 3: Post-processing pipeline
         _process_blueprint(blueprint)
 
         # Summary
